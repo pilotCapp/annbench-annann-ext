@@ -17,17 +17,19 @@ def stringify_dict(d):
 
     return s[:-2]  # delete the last ", "
 
+
 # The following IO/eval functions are from faiss
 # https://github.com/facebookresearch/faiss/blob/master/benchs/datasets.py
 
+
 def ivecs_read(fname):
-    a = np.fromfile(fname, dtype='int32')
+    a = np.fromfile(fname, dtype="int32")
     d = a[0]
     return a.reshape(-1, d + 1)[:, 1:].copy()
 
 
 def fvecs_read(fname):
-    return ivecs_read(fname).view('float32')
+    return ivecs_read(fname).view("float32")
 
 
 def recall_at_r(I, gt, r):
@@ -82,7 +84,7 @@ def evaluate(algo, vecs_query, gt, topk, r, param_query):
             # Suppose row is a list (not np.array)
             ids[n] = row + [-1] * (topk - len(row))
     ids = np.array(ids)
-
     assert ids.shape == (nq, topk)
 
+    # print([list(item) for item in zip(ids, gt)])
     return (t1 - t0) / nq, recall_at_r(I=ids, gt=gt, r=r)

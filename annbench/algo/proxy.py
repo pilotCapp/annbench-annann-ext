@@ -13,6 +13,7 @@ def check_module(module_name):
 if check_module("annoy"):
     from .annoy import AnnoyANN
 
+
 if check_module("hnswlib"):
     from .hnsw import HnswANN
 
@@ -34,6 +35,7 @@ if check_module("scann"):
 if check_module("pynndescent"):
     from .pynndescent import PynndescentANN
 
+
 def instantiate_algorithm(name):
     """
     Instantiate an algorithm class
@@ -44,7 +46,10 @@ def instantiate_algorithm(name):
         an instance of the specified algorithm class
     """
 
-    if name == "annoy":
+    if name == "annann":
+        from annbench.algo.annann import ANNANN
+        return ANNANN()
+    elif name == "annoy":
         return AnnoyANN()
     elif name == "ivfpq":
         return IvfpqANN()
