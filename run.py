@@ -26,6 +26,9 @@ def main(cfg: DictConfig) -> None:
 
     ret_all = []
     for param_index in cfg.algo.param_index:
+
+        algo.set_index_param(param=param_index)
+
         log.info(f"Start to build. index_param={param_index}")
 
         # The absolute path to the index
@@ -39,6 +42,11 @@ def main(cfg: DictConfig) -> None:
             exist_ok=True, parents=True
         )  # Make sure the parent directory exists
 
+        if algo.name:
+            algo.path = str(p)
+
+        algo.normalizer.fit(dataset.vecs_train())
+
         # Build the index, or read the index if it has been already built
         if p.exists() and not algo.has_train():
             log.info("The index already exists. Read it")
@@ -46,8 +54,6 @@ def main(cfg: DictConfig) -> None:
             algo.read(path=str(p), D=dataset.D())
         else:
             print("index does not exist")
-            algo.set_index_param(param=param_index)
-
             t0 = time.time()
             memory_usage_before = algo.get_memory_usage()
 

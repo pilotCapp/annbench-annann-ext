@@ -8,6 +8,3 @@ param_index:
 param_query:
   cluster_num:
     - 0.001
-    - 0.01
-    - 0.03
-    - 0.05

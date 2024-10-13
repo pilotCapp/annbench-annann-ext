@@ -15,8 +15,10 @@ class HnswANN(BaseANN):
 
     def add(self, vecs):
         N, D = vecs.shape
-        self.index = hnswlib.Index(space='l2', dim=D)
-        self.index.init_index(max_elements=N, ef_construction=self.ef_construction, M=self.M)
+        self.index = hnswlib.Index(space="l2", dim=D)
+        self.index.init_index(
+            max_elements=N, ef_construction=self.ef_construction, M=self.M
+        )
         self.index.add_items(data=vecs)
 
     def query(self, vecs, topk, param):
@@ -30,10 +32,8 @@ class HnswANN(BaseANN):
 
     def read(self, path, D):
         # self.ef_construction and self.M are not set after reading
-        self.index = hnswlib.Index(space='l2', dim=D)
+        self.index = hnswlib.Index(space="l2", dim=D)
         self.index.load_index(path_to_index=path)
 
     def stringify_index_param(self, param):
         return f"efc{param['ef_construction']}_M{param['M']}.bin"
-
-

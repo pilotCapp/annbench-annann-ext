@@ -11,8 +11,11 @@ from pathlib import Path
 from hydra.utils import to_absolute_path
 import time
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+import joblib
+from .hnsw import HnswANN
 
 
+@tf.function
 def soft_cluster_assignments(z, cluster_centers, alpha=1.0):
     q = 1.0 / (
         1.0
@@ -28,6 +31,7 @@ def soft_cluster_assignments(z, cluster_centers, alpha=1.0):
     return q
 
 
+@tf.function
 def target_distribution(q):
     weight = q**2 / tf.reduce_sum(q, axis=0)
     p = tf.transpose(tf.transpose(weight) / tf.reduce_sum(weight, axis=1))
@@ -37,6 +41,7 @@ def target_distribution(q):
 def dec_loss(encoder, cluster_centers, alpha=1.0):
     mse = tf.keras.losses.MeanSquaredError()
 
+    @tf.function
     def loss_function(y_true, y_pred):
         # Reconstruction loss (mean squared error)
         reconstruction_loss = tf.keras.losses.mse(y_true, y_pred)
@@ -63,16 +68,22 @@ def dec_loss(encoder, cluster_centers, alpha=1.0):
 
 class ANNANN(BaseANN):
     def __init__(self):
+        self.name = "annann"
         self.index = None
-        self.nn_layers = 5
-        self.n_clusters = 10000
+        self.nn_layers = 3
+        self.n_clusters = 1000
         self.encoding_dim = None
         self.autoencoder = None
         self.encoder = None
+        self.path = None
         self.cluster_algorithm = MiniBatchKMeans(
             n_clusters=self.n_clusters, max_iter=300
         )
-        self.train_size = 0.2
+        self.hnsw = HnswANN()  # use HNSW for cluster lookup
+        self.hnsw.set_index_param({"ef_construction": 300, "M": 15})
+        self.normalizer = MinMaxScaler()
+
+        self.train_size = 1
 
         self.query_runs = 0
         self.query_time_1 = 0
@@ -91,9 +102,8 @@ class ANNANN(BaseANN):
         self.encoding_dim = param["input_param"]
 
     def train(self, vecs, path):
+        self.path = path
         model_path = os.path.join(path, "model.keras")
-
-        self.normalizer = MinMaxScaler()
 
         self.normalizer.fit(vecs)
         normalized_vecs = self.normalizer.transform(vecs)
@@ -103,8 +113,10 @@ class ANNANN(BaseANN):
             self.autoencoder = tf.keras.models.load_model(model_path)
             self.encoder = tf.keras.models.Model(
                 inputs=self.autoencoder.input,
-                outputs=self.autoencoder.layers[-2].output,
+                outputs=self.autoencoder.layers[self.nn_layers].output,
             )
+            self.normalizer = joblib.load(os.path.join(path, "normalizer.pkl"))
+            print(self.encoder.output_shape)
         else:
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
             normalized_vecs = normalized_vecs[
@@ -118,11 +130,7 @@ class ANNANN(BaseANN):
             # Calculate the sizes of the encoder layers
             # This will create a list of sizes decreasing from input_dim to encoding_dim
             encoder_layer_sizes = [
-                int(
-                    input_dim
-                    - i / (self.nn_layers) * int(input_dim * self.encoding_dim)
-                )
-                for i in range(1, self.nn_layers + 1)
+                int(input_dim * 2 / (2**i)) for i in range(0, self.nn_layers)
             ]
             print(encoder_layer_sizes)
 
@@ -153,8 +161,9 @@ class ANNANN(BaseANN):
             self.autoencoder.compile(optimizer="adam", loss="mean_squared_error")
             # Define early stopping
             early_stopping_initial = tf.keras.callbacks.EarlyStopping(
-                monitor="loss", patience=5, restore_best_weights=True
+                monitor="loss", patience=3, restore_best_weights=True
             )
+            print("encoder output shape:", self.encoder.output_shape)
 
             # Add early stopping as a callback
             self.autoencoder.fit(
@@ -165,7 +174,6 @@ class ANNANN(BaseANN):
                 callbacks=[early_stopping_initial],
             )
             predictions = self.encoder.predict(normalized_vecs)
-
             initial_cluster_centers = self.cluster_algorithm.fit(
                 predictions
             ).cluster_centers_
@@ -181,16 +189,17 @@ class ANNANN(BaseANN):
             self.autoencoder.fit(
                 normalized_vecs,
                 normalized_vecs,
-                epochs=25,
+                epochs=15,
                 batch_size=64,
                 callbacks=[early_stopping_final],
             )
             self.autoencoder.compile(optimizer="adam", loss="mean_squared_error")
             self.autoencoder.save(model_path)
+            joblib.dump(self.normalizer, os.path.join(path, "normalizer.pkl"))
             print("model saved")
 
     def has_train(self):
-        return True
+        return not os.path.exists(os.path.join(self.path, "model.keras"))
 
     def add(self, vecs):
         normalized_vecs = self.normalizer.transform(vecs)
@@ -199,6 +208,8 @@ class ANNANN(BaseANN):
         self.cluster_algorithm.fit(encoded_vecs)
         cluster_assignments = self.cluster_algorithm.predict(encoded_vecs)
         self.centroids = self.cluster_algorithm.cluster_centers_
+
+        self.hnsw.add(self.centroids)
 
         self.index = {}  # TODO change to ssd read/write
 
@@ -228,26 +239,35 @@ class ANNANN(BaseANN):
         # Ensure centroids are NumPy arrays
         centroids = np.array(self.centroids)
 
-        # Compute squared norms of encoded_queries and centroids
-        queries_norm_squared = np.sum(np.square(encoded_queries), axis=1).reshape(
-            -1, 1
-        )  # Shape: (num_queries, 1)
-        centroids_norm_squared = np.sum(np.square(centroids), axis=1).reshape(
-            1, -1
-        )  # Shape: (1, num_centroids)
+        # Compute eculidian distance to centroids
+        # # Compute squared norms of encoded_queries and centroids
+        # queries_norm_squared = np.sum(np.square(encoded_queries), axis=1).reshape(
+        #     -1, 1
+        # )  # Shape: (num_queries, 1)
+        # centroids_norm_squared = np.sum(np.square(centroids), axis=1).reshape(
+        #     1, -1
+        # )  # Shape: (1, num_centroids)
 
-        # Compute dot product between queries and centroids
-        dot_product = np.dot(
-            encoded_queries, centroids.T
-        )  # Shape: (num_queries, num_centroids)
+        # # Compute dot product between queries and centroids
+        # dot_product = np.dot(
+        #     encoded_queries, centroids.T
+        # )  # Shape: (num_queries, num_centroids)
 
-        # Compute distances using the efficient formula
-        distances_to_centroids = np.sqrt(
-            queries_norm_squared - 2 * dot_product + centroids_norm_squared
+        # # Compute distances using the efficient formula
+        # distances_to_centroids = np.sqrt(
+        #     queries_norm_squared - 2 * dot_product + centroids_norm_squared
+        # )
+
+        # # Find the closest centroid for each query
+        # closest_centroid_indices = np.argsort(distances_to_centroids, axis=1)
+
+        # Find closest clusters using HNSW
+        clusters_to_find = max(
+            int(param.get("cluster_num", "default") * self.n_clusters), 1
         )
-
-        # Find the closest centroid for each query
-        closest_centroid_indices = np.argsort(distances_to_centroids, axis=1)
+        closest_centroid_indices = self.hnsw.query(
+            encoded_queries, clusters_to_find, {"ef": 100}
+        )
 
         results = []
         self.query_time_2 += time.time() - time_log
@@ -257,10 +277,7 @@ class ANNANN(BaseANN):
             time_log_3 = time.time()
             # Retrieve cluster entries corresponding to the closest centroid
             cluster_entries = [[], []]
-            cluster_number = max(
-                int(param.get("cluster_num", "default") * self.n_clusters), 1
-            )
-            for i in closest_centroid_idx[:cluster_number]:
+            for i in closest_centroid_idx[:clusters_to_find]:
                 cluster_entries[0].extend(self.index[i][0])
                 cluster_entries[1].extend(self.index[i][1])
 
@@ -308,15 +325,25 @@ class ANNANN(BaseANN):
         with open(os.path.join(path, "index.pkl"), "wb") as f:
             pickle.dump(self.index, f)
 
+        with open(os.path.join(path, "centroids.pkl"), "wb") as f:
+            pickle.dump(self.centroids, f)
+
     def read(self, path, D):
-        print("storing path")
-        self.path = path
+        print("Reading index")
         with open(os.path.join(path, "index.pkl"), "rb") as f:
             self.index = pickle.load(f)
+        with open(os.path.join(path, "centroids.pkl"), "rb") as f:
+            self.centroids = pickle.load(f)
+        self.autoencoder = tf.keras.models.load_model(os.path.join(path, "model.keras"))
+        self.encoder = tf.keras.models.Model(
+            inputs=self.autoencoder.input,
+            outputs=self.autoencoder.layers[self.nn_layers].output,
+        )
+        normalizer = joblib.load(os.path.join(path, "normalizer.pkl"))
 
     def stringify_index_param(self, param):
         """Convert index parameters to a string representation."""
-        return f"train_size_{param.get('input_param', 'default')}_encodingdim_{self.encoding_dim}_clusters_{self.n_clusters}"
+        return f"train_size_{param.get('input_param', 'default')}_encodingdim_{self.encoding_dim}_clusters_{self.n_clusters}_layers_{self.nn_layers}"
 
 
 # query time 1%: 0.014361327789875485
