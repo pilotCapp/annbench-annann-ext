@@ -7,6 +7,7 @@ import annbench
 import yaml
 import numpy as np
 import time
+import os
 
 log = logging.getLogger(__name__)
 
@@ -47,21 +48,20 @@ def main(cfg: DictConfig) -> None:
 
         algo.normalizer.fit(dataset.vecs_train())
 
+        ## should probably split this for index and model
         # Build the index, or read the index if it has been already built
-        if p.exists() and not algo.has_train():
+        if os.path.exists(os.path.join(p, "index.pkl")) and not algo.has_train():
             log.info("The index already exists. Read it")
-            print("index exists")
             algo.read(path=str(p), D=dataset.D())
         else:
             print("index does not exist")
             t0 = time.time()
             memory_usage_before = algo.get_memory_usage()
 
-            if algo.has_train():
-                log.info("Start to train")
-                algo.train(
-                    vecs=dataset.vecs_train(), path=p
-                )  # added path to save the model for annan, probably results in error for other algorithms
+            log.info("Start to train")
+            algo.train(  # training model, checks nativly if model exists
+                vecs=dataset.vecs_train(), path=p
+            )  # added path to save the model for annan, probably results in error for other algorithms
             log.info("Start to add")
             algo.add(vecs=dataset.vecs_base())
             build_time = time.time() - t0

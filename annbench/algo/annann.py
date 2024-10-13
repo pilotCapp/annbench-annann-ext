@@ -75,6 +75,7 @@ class ANNANN(BaseANN):
         self.encoding_dim = None
         self.autoencoder = None
         self.encoder = None
+        self.decoder = None
         self.path = None
         self.cluster_algorithm = MiniBatchKMeans(
             n_clusters=self.n_clusters, max_iter=300
@@ -115,8 +116,13 @@ class ANNANN(BaseANN):
                 inputs=self.autoencoder.input,
                 outputs=self.autoencoder.layers[self.nn_layers].output,
             )
+            self.decoder = tf.keras.models.Model(
+                inputs=self.autoencoder.layers[self.nn_layers + 1].input,
+                outputs=self.autoencoder.output,
+            )
             self.normalizer = joblib.load(os.path.join(path, "normalizer.pkl"))
-            print(self.encoder.output_shape)
+            print("encoder retrieved with shape", self.encoder.output_shape)
+            print("decoder retrieved with shape", self.decoder.output_shape)
         else:
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
             normalized_vecs = normalized_vecs[
@@ -158,6 +164,10 @@ class ANNANN(BaseANN):
             self.autoencoder = tf.keras.models.Model(input_vec, decoded)
             # Define the encoder model
             self.encoder = tf.keras.models.Model(input_vec, encoded)
+            self.decoder = tf.keras.models.Model(
+                inputs=self.autoencoder.layers[self.nn_layers + 1].input,
+                outputs=self.autoencoder.layers.output,
+            )
             self.autoencoder.compile(optimizer="adam", loss="mean_squared_error")
             # Define early stopping
             early_stopping_initial = tf.keras.callbacks.EarlyStopping(
@@ -339,6 +349,12 @@ class ANNANN(BaseANN):
             inputs=self.autoencoder.input,
             outputs=self.autoencoder.layers[self.nn_layers].output,
         )
+        self.decoder = tf.keras.models.Model(
+            inputs=self.autoencoder.layers[self.nn_layers + 1].input,
+            outputs=self.autoencoder.layers.output,
+        )
+        print("encoder retrieved with shape", self.encoder.output_shape)
+        print("decoder retrieved with shape", self.decoder.output_shape)
         normalizer = joblib.load(os.path.join(path, "normalizer.pkl"))
 
     def stringify_index_param(self, param):
