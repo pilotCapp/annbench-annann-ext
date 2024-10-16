@@ -72,20 +72,23 @@ class ANNANN(BaseANN):
         self.name = "annann"
         self.index = None
         self.nn_layers = 2
-        self.n_clusters = 100
-        
-        self.n_clusters_small=10
-        
+        self.n_main_clusters = 100
+        self.n_sub_clusters = 10
+
         self.encoding_dim = None
         self.autoencoder = None
         self.encoder = None
         self.decoder = None
         self.path = None
-        self.cluster_algorithm = MiniBatchKMeans(
-            n_clusters=self.n_clusters, max_iter=300
+        self.cluster_algorithm = self.cluster_algorithm_small = KMeans(
+            n_clusters=self.n_clusters
         )
+        self.cluster_algorithm_small = KMeans(n_clusters=self.n_clusters_small)
+
         self.hnsw = HnswANN()  # use HNSW for cluster lookup
         self.hnsw.set_index_param({"ef_construction": 300, "M": 15})
+        self.hnsw_small = {}
+
         self.normalizer = MinMaxScaler()
 
         self.train_size = 1
@@ -239,17 +242,52 @@ class ANNANN(BaseANN):
 
         self.index = {}  # TODO change to ssd read/write
 
-        for k, (vector, cluster) in enumerate(zip(vecs, cluster_assignments)):
-            if cluster not in self.index:
-                self.index[cluster] = [[], []]
-            self.index[cluster][0].append(k)
-            self.index[cluster][1].append(vector)
+        for k, (vector, main_cluster_index) in enumerate(
+            zip(vecs, cluster_assignments)
+        ):
+            if main_cluster_index not in self.index:
+                self.index[main_cluster_index] = [[], []]
+            self.index[main_cluster_index][0].append(k)
+            self.index[main_cluster_index][1].append(vector)
+
+        for cluster_index in self.index.keys():
+            if len(self.index[cluster_index][1]) < 10:
+                raise ("too few instances in main_cluster, fix this future kris")
+
+            self.cluster_algorithm_small.fit(self.index[cluster_index][1])
+            cluster_assignments_small = self.cluster_algorithm_small.predict(
+                self.index[cluster_index][1]
+            )
+            cluster_small_centroids = self.cluster_algorithm_small.cluster_centers_
+
+            if cluster_index not in self.hnsw_small:
+                self.hnsw_small[cluster_index] = HnswANN()
+
+            self.hnsw_small[cluster_index].set_index_param(
+                {"ef_construction": 10, "M": 5}
+            )
+            self.hnsw_small[cluster_index].add(cluster_small_centroids)
+
+            temp_index = {}
+
+            for vector_index, vector, small_cluster_assignment in zip(
+                self.index[cluster_index][0],
+                self.index[cluster_index][1],
+                cluster_assignments_small,
+            ):
+                if small_cluster_assignment not in temp_index:
+                    temp_index[small_cluster_assignment] = [[], []]
+
+                temp_index[small_cluster_assignment][0].append(vector_index)
+                temp_index[small_cluster_assignment][1].append(vector)
+            self.index[cluster_index] = temp_index
 
         # for a, index in enumerate(cluster_assignments):
         #     if a not in self.index:
         #         self.index[a] = []
         #     self.index[a].append(vecs[index])
         print("index built with length", len(self.index))
+        print("with sub cluster length,", len(self.index[0]))
 
     def query(self, vecs, topk, param):
         time_log = time.time()
@@ -265,62 +303,44 @@ class ANNANN(BaseANN):
         # Ensure centroids are NumPy arrays
         centroids = np.array(self.centroids)
 
-        # Find closest clusters using HNSW
-        clusters_to_find = max(
-            10 * int(param.get("cluster_num", "default") * self.n_clusters),
-            1,  # multiplying by n for later filtering using the decoder
+        closest_main_centroid_indices = self.hnsw.query(
+            encoded_queries,
+            param["branch_num"],
+            {"ef": 100},  # finding the closest main clusters with branch param
         )
-
-        closest_centroid_indices = self.hnsw.query(
-            encoded_queries, clusters_to_find, {"ef": 100}
-        )
-
-        all_closest_centroid_indices = np.unique(
-            np.concatenate(closest_centroid_indices)
-        )
-        decoded_centroids = self.decode(
-            self.centroids[all_closest_centroid_indices]
-        ).numpy()
-
-        centroid_idx_to_decoded = {
-            idx: decoded_centroids[pos]
-            for pos, idx in enumerate(all_closest_centroid_indices)
-        }
 
         results = []
         self.query_time_2 += time.time() - time_log  # Time for finding closest clusters
         time_log = time.time()
-        for original_query, closest_centroid_idx in zip(vecs, closest_centroid_indices):
+        for original_query, closest_centroid_idx in zip(
+            vecs, closest_main_centroid_indices
+        ):
             time_log_3 = time.time()
-
-            closest_centroids_decoded = np.array(
-                [centroid_idx_to_decoded[idx] for idx in closest_centroid_idx]
-            )
-
+            # no need for decoding anymore...
             self.query_time_3_1 += (
                 time.time() - time_log_3
-            )  # Time for decoding centroids
+            )  # Time for decoding centroids, not feasable
             time_log_3 = time.time()
 
-            closest_centroid_distances = np.argsort(
-                np.linalg.norm(closest_centroids_decoded - original_query, axis=1)
-            )
-
-            self.query_time_3_2 += (
-                time.time() - time_log_3
-            )  # Time for retrieving and sorting distances
-            time_log_3 = time.time()
-
-            # Retrieve cluster entries corresponding to the closest centroid
             cluster_entries = [[], []]
-            for i in closest_centroid_idx[
-                closest_centroid_distances[:clusters_to_find]
-            ]:
-                cluster_entries[0].extend(self.index[i][0])
-                cluster_entries[1].extend(self.index[i][1])
 
-            if len(cluster_entries) < topk:
-                print("not enough entries in cluster")
+            for main_cluster in closest_centroid_idx:
+                closest_sub_clusters = self.hnsw_small[main_cluster].query(
+                    original_query,
+                    param["branch_num"],
+                    {
+                        "ef": 100
+                    },  # should be param["branch_num"], 10 for testing accuracy of subdomain
+                )
+                self.query_time_3_2 += (
+                    time.time() - time_log_3
+                )  # Time for retrieving and sorting distances
+                time_log_3 = time.time()
+
+                # Retrieve cluster entries corresponding to the closest centroid
+                for i in closest_sub_clusters[0]:
+                    cluster_entries[0].extend(self.index[main_cluster][i][0])
+                    cluster_entries[1].extend(self.index[main_cluster][i][1])
 
             indices_list = cluster_entries[0]
             vectors_list = cluster_entries[1]
