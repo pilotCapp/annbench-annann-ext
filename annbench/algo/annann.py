@@ -68,10 +68,14 @@ def dec_loss(encoder, cluster_centers, alpha=1.0):
 
 class ANNANN(BaseANN):
     def __init__(self):
+        self.input_dim = 128  # only for sift
         self.name = "annann"
         self.index = None
-        self.nn_layers = 3
-        self.n_clusters = 1000
+        self.nn_layers = 2
+        self.n_clusters = 100
+        
+        self.n_clusters_small=10
+        
         self.encoding_dim = None
         self.autoencoder = None
         self.encoder = None
@@ -121,8 +125,16 @@ class ANNANN(BaseANN):
                 outputs=self.autoencoder.output,
             )
             self.normalizer = joblib.load(os.path.join(path, "normalizer.pkl"))
-            print("encoder retrieved with shape", self.encoder.output_shape)
-            print("decoder retrieved with shape", self.decoder.output_shape)
+            print(
+                "encoder retrieved with input/output shape",
+                self.encoder.input_shape,
+                self.encoder.output_shape,
+            )
+            print(
+                "decoder retrieved with input/output shape",
+                self.decoder.input_shape,
+                self.decoder.output_shape,
+            )
         else:
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
             normalized_vecs = normalized_vecs[
@@ -135,10 +147,14 @@ class ANNANN(BaseANN):
 
             # Calculate the sizes of the encoder layers
             # This will create a list of sizes decreasing from input_dim to encoding_dim
+            steps = (input_dim - int(input_dim * self.encoding_dim)) / (
+                max(self.nn_layers - 1, 1)
+            )
             encoder_layer_sizes = [
-                int(input_dim * 2 / (2**i)) for i in range(0, self.nn_layers)
+                int(input_dim - i * steps) for i in range(0, self.nn_layers)
             ]
-            print(encoder_layer_sizes)
+
+            print("encoder layer sizes", encoder_layer_sizes)
 
             # Build the encoder
             encoded = input_vec
@@ -166,7 +182,7 @@ class ANNANN(BaseANN):
             self.encoder = tf.keras.models.Model(input_vec, encoded)
             self.decoder = tf.keras.models.Model(
                 inputs=self.autoencoder.layers[self.nn_layers + 1].input,
-                outputs=self.autoencoder.layers.output,
+                outputs=self.autoencoder.output,
             )
             self.autoencoder.compile(optimizer="adam", loss="mean_squared_error")
             # Define early stopping
@@ -244,84 +260,84 @@ class ANNANN(BaseANN):
 
         encoded_queries = self.encode(normalized_vecs).numpy()
 
-        self.query_time_1 += time.time() - time_log
+        self.query_time_1 += time.time() - time_log  # Time for encoding queries
         time_log = time.time()
         # Ensure centroids are NumPy arrays
         centroids = np.array(self.centroids)
 
-        # Compute eculidian distance to centroids
-        # # Compute squared norms of encoded_queries and centroids
-        # queries_norm_squared = np.sum(np.square(encoded_queries), axis=1).reshape(
-        #     -1, 1
-        # )  # Shape: (num_queries, 1)
-        # centroids_norm_squared = np.sum(np.square(centroids), axis=1).reshape(
-        #     1, -1
-        # )  # Shape: (1, num_centroids)
-
-        # # Compute dot product between queries and centroids
-        # dot_product = np.dot(
-        #     encoded_queries, centroids.T
-        # )  # Shape: (num_queries, num_centroids)
-
-        # # Compute distances using the efficient formula
-        # distances_to_centroids = np.sqrt(
-        #     queries_norm_squared - 2 * dot_product + centroids_norm_squared
-        # )
-
-        # # Find the closest centroid for each query
-        # closest_centroid_indices = np.argsort(distances_to_centroids, axis=1)
-
         # Find closest clusters using HNSW
         clusters_to_find = max(
-            int(param.get("cluster_num", "default") * self.n_clusters), 1
+            10 * int(param.get("cluster_num", "default") * self.n_clusters),
+            1,  # multiplying by n for later filtering using the decoder
         )
+
         closest_centroid_indices = self.hnsw.query(
             encoded_queries, clusters_to_find, {"ef": 100}
         )
 
+        all_closest_centroid_indices = np.unique(
+            np.concatenate(closest_centroid_indices)
+        )
+        decoded_centroids = self.decode(
+            self.centroids[all_closest_centroid_indices]
+        ).numpy()
+
+        centroid_idx_to_decoded = {
+            idx: decoded_centroids[pos]
+            for pos, idx in enumerate(all_closest_centroid_indices)
+        }
+
         results = []
-        self.query_time_2 += time.time() - time_log
+        self.query_time_2 += time.time() - time_log  # Time for finding closest clusters
         time_log = time.time()
         for original_query, closest_centroid_idx in zip(vecs, closest_centroid_indices):
-
             time_log_3 = time.time()
+
+            closest_centroids_decoded = np.array(
+                [centroid_idx_to_decoded[idx] for idx in closest_centroid_idx]
+            )
+
+            self.query_time_3_1 += (
+                time.time() - time_log_3
+            )  # Time for decoding centroids
+            time_log_3 = time.time()
+
+            closest_centroid_distances = np.argsort(
+                np.linalg.norm(closest_centroids_decoded - original_query, axis=1)
+            )
+
+            self.query_time_3_2 += (
+                time.time() - time_log_3
+            )  # Time for retrieving and sorting distances
+            time_log_3 = time.time()
+
             # Retrieve cluster entries corresponding to the closest centroid
             cluster_entries = [[], []]
-            for i in closest_centroid_idx[:clusters_to_find]:
+            for i in closest_centroid_idx[
+                closest_centroid_distances[:clusters_to_find]
+            ]:
                 cluster_entries[0].extend(self.index[i][0])
                 cluster_entries[1].extend(self.index[i][1])
 
             if len(cluster_entries) < topk:
                 print("not enough entries in cluster")
 
-            self.query_time_3_1 += time.time() - time_log_3
-            time_log_3 = time.time()
-
             indices_list = cluster_entries[0]
             vectors_list = cluster_entries[1]
-
-            self.query_time_3_2 += time.time() - time_log_3
-            time_log_3 = time.time()
-            time_log_3_3 = time.time()
 
             # Compute distances from the original query to all vectors in the closest clusters
             # Using efficient NumPy broadcasting
             distances = np.linalg.norm(vectors_list - original_query, axis=1)
 
-            self.query_time_3_3_1 += time.time() - time_log_3_3
-            time_log_3_3 = time.time()
-
             # Get indices of the top-k nearest neighbors
             topk_indices = np.argsort(distances)[:topk]
-
-            self.query_time_3_3_2 += time.time() - time_log_3_3
-            time_log_3_3 = time.time()
 
             # Append the indices of the top-k nearest neighbors to the results
             results.append([indices_list[i] for i in topk_indices])
 
-            self.query_time_3_3_3 = time.time() - time_log_3_3
-            self.query_time_3_3 += time.time() - time_log_3
+            self.query_time_3_3 += (
+                time.time() - time_log_3
+            )  # Time for computing distances and sorting
 
         self.query_time_3 += time.time() - time_log
         return results
@@ -330,6 +346,10 @@ class ANNANN(BaseANN):
     def encode(self, vecs):
         return self.encoder(vecs, training=False)
 
+    @tf.function
+    def decode(self, vecs):
+        return self.decoder(vecs, training=False)
+
     def write(self, path):
         os.makedirs(path, exist_ok=True)
         with open(os.path.join(path, "index.pkl"), "wb") as f:
@@ -337,6 +357,8 @@ class ANNANN(BaseANN):
 
         with open(os.path.join(path, "centroids.pkl"), "wb") as f:
             pickle.dump(self.centroids, f)
+
+        self.hnsw.write(os.path.join(path, "hnsw"))
 
     def read(self, path, D):
         print("Reading index")
@@ -351,15 +373,33 @@ class ANNANN(BaseANN):
         )
         self.decoder = tf.keras.models.Model(
             inputs=self.autoencoder.layers[self.nn_layers + 1].input,
-            outputs=self.autoencoder.layers.output,
+            outputs=self.autoencoder.output,
         )
-        print("encoder retrieved with shape", self.encoder.output_shape)
-        print("decoder retrieved with shape", self.decoder.output_shape)
+        print(
+            "encoder retrieved with input/output shape",
+            self.encoder.input_shape,
+            self.encoder.output_shape,
+        )
+        print(
+            "decoder retrieved with input/output shape",
+            self.decoder.input_shape,
+            self.decoder.output_shape,
+        )
         normalizer = joblib.load(os.path.join(path, "normalizer.pkl"))
+        print("reading encoding dim", self.encoding_dim)
+
+        self.hnsw.read(
+            os.path.join(
+                path,
+                "hnsw",
+            ),
+            int(self.input_dim * self.encoding_dim),
+        )
 
     def stringify_index_param(self, param):
         """Convert index parameters to a string representation."""
-        return f"train_size_{param.get('input_param', 'default')}_encodingdim_{self.encoding_dim}_clusters_{self.n_clusters}_layers_{self.nn_layers}"
+        print(self.encoding_dim)
+        return f"train_size_{self.train_size}_encodingdim_{self.encoding_dim}_clusters_{self.n_clusters}_layers_{self.nn_layers}"
 
 
 # query time 1%: 0.014361327789875485

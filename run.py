@@ -132,9 +132,6 @@ def main(cfg: DictConfig) -> None:
     print(f"\nquery time 3_1%: {algo.query_time_3_1/algo.query_time_3}")
     print(f"\nquery time 3_2%: {algo.query_time_3_2/algo.query_time_3}")
     print(f"\nquery time 3_3%: {algo.query_time_3_3/algo.query_time_3}")
-    print(f"\nquery time 3_3_1%: {algo.query_time_3_3_1/algo.query_time_3_3}")
-    print(f"\nquery time 3_3_2%: {algo.query_time_3_3_2/algo.query_time_3_3}")
-    print(f"\nquery time 3_3_3%: {algo.query_time_3_3_3/algo.query_time_3_3}")
 
 
 if __name__ == "__main__":

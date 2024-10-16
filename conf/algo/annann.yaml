@@ -3,8 +3,12 @@
 name: annann
 
 param_index:
+  - input_param: 0.75
   - input_param: 0.5
+  - input_param: 0.25
 
 param_query:
   cluster_num:
     - 0.001
+    - 0.005
+    - 0.01
