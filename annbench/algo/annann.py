@@ -72,18 +72,26 @@ class ANNANN(BaseANN):
         self.name = "annann"
         self.index = None
         self.nn_layers = 2
+
         self.n_main_clusters = 100
-        self.n_sub_clusters = 10
+        self.n_sub_clusters = 1000
 
         self.encoding_dim = None
         self.autoencoder = None
         self.encoder = None
         self.decoder = None
         self.path = None
+
         self.cluster_algorithm = self.cluster_algorithm_small = KMeans(
-            n_clusters=self.n_clusters
+            n_clusters=self.n_sub_clusters
         )
-        self.cluster_algorithm_small = KMeans(n_clusters=self.n_clusters_small)
+        self.cluster_algorithm_main = self.cluster_algorithm_small = KMeans(
+            n_clusters=self.n_main_clusters
+        )
+
+        self.cluster_algorithm_small = KMeans(
+            n_clusters=int(self.n_sub_clusters / self.n_main_clusters)
+        )
 
         self.hnsw = HnswANN()  # use HNSW for cluster lookup
         self.hnsw.set_index_param({"ef_construction": 300, "M": 15})
@@ -202,8 +210,12 @@ class ANNANN(BaseANN):
                 batch_size=64,
                 callbacks=[early_stopping_initial],
             )
-            predictions = self.encoder.predict(normalized_vecs)
-            initial_cluster_centers = self.cluster_algorithm.fit(
+
+            predictions = self.encoder.predict(
+                normalized_vecs
+            )  # predicint sub_cluster positions
+
+            sub_cluster_centers = self.cluster_algorithm.fit(
                 predictions
             ).cluster_centers_
 
@@ -213,7 +225,7 @@ class ANNANN(BaseANN):
 
             self.autoencoder.compile(
                 optimizer="adam",
-                loss=dec_loss(self.encoder, initial_cluster_centers),
+                loss=dec_loss(self.encoder, sub_cluster_centers),
             )
             self.autoencoder.fit(
                 normalized_vecs,
@@ -222,6 +234,7 @@ class ANNANN(BaseANN):
                 batch_size=64,
                 callbacks=[early_stopping_final],
             )
+
             self.autoencoder.compile(optimizer="adam", loss="mean_squared_error")
             self.autoencoder.save(model_path)
             joblib.dump(self.normalizer, os.path.join(path, "normalizer.pkl"))
@@ -231,12 +244,13 @@ class ANNANN(BaseANN):
         return not os.path.exists(os.path.join(self.path, "model.keras"))
 
     def add(self, vecs):
-        normalized_vecs = self.normalizer.transform(vecs)
-        encoded_vecs = self.encode(normalized_vecs).numpy()
+        # normalized_vecs = self.normalizer.transform(vecs)
+        # encoded_vecs = self.encode(normalized_vecs).numpy()
 
-        self.cluster_algorithm.fit(encoded_vecs)
-        cluster_assignments = self.cluster_algorithm.predict(encoded_vecs)
-        self.centroids = self.cluster_algorithm.cluster_centers_
+        self.cluster_algorithm_main.fit(vecs)
+
+        cluster_assignments = self.cluster_algorithm_main.predict(vecs)
+        self.centroids = self.cluster_algorithm_main.cluster_centers_
 
         self.hnsw.add(self.centroids)
 
@@ -254,9 +268,12 @@ class ANNANN(BaseANN):
             if len(self.index[cluster_index][1]) < 10:
                 raise ("too few instances in main_cluster, fix this future kris")
 
-            self.cluster_algorithm_small.fit(self.index[cluster_index][1])
+            normalized_vecs = self.normalizer.transform(self.index[cluster_index][1])
+            encoded_vecs = self.encode(normalized_vecs).numpy()
+
+            self.cluster_algorithm_small.fit(encoded_vecs)
             cluster_assignments_small = self.cluster_algorithm_small.predict(
-                self.index[cluster_index][1]
+                encoded_vecs
             )
             cluster_small_centroids = self.cluster_algorithm_small.cluster_centers_
 
@@ -293,10 +310,9 @@ class ANNANN(BaseANN):
         time_log = time.time()
 
         normalized_vecs = self.normalizer.transform(vecs)
+        encoded_queries = self.encode(normalized_vecs).numpy()
         self.query_runs += 1
         # Encode the query vectors
-
-        encoded_queries = self.encode(normalized_vecs).numpy()
 
         self.query_time_1 += time.time() - time_log  # Time for encoding queries
         time_log = time.time()
@@ -304,7 +320,7 @@ class ANNANN(BaseANN):
         centroids = np.array(self.centroids)
 
         closest_main_centroid_indices = self.hnsw.query(
-            encoded_queries,
+            vecs,
             param["branch_num"],
             {"ef": 100},  # finding the closest main clusters with branch param
         )
@@ -312,8 +328,8 @@ class ANNANN(BaseANN):
         results = []
         self.query_time_2 += time.time() - time_log  # Time for finding closest clusters
         time_log = time.time()
-        for original_query, closest_centroid_idx in zip(
-            vecs, closest_main_centroid_indices
+        for original_query, embedded_query, closest_centroid_idx in zip(
+            vecs, encoded_queries, closest_main_centroid_indices
         ):
             time_log_3 = time.time()
             # no need for decoding anymore...
@@ -326,8 +342,8 @@ class ANNANN(BaseANN):
 
             for main_cluster in closest_centroid_idx:
                 closest_sub_clusters = self.hnsw_small[main_cluster].query(
-                    original_query,
-                    param["branch_num"],
+                    embedded_query,
+                    10,
                     {
                         "ef": 100
                     },  # should be param["branch_num"], 10 for testing accuracy of subdomain
@@ -419,7 +435,7 @@ class ANNANN(BaseANN):
     def stringify_index_param(self, param):
         """Convert index parameters to a string representation."""
         print(self.encoding_dim)
-        return f"train_size_{self.train_size}_encodingdim_{self.encoding_dim}_clusters_{self.n_clusters}_layers_{self.nn_layers}"
+        return f"train_size_{self.train_size}_encodingdim_{self.encoding_dim}_clusters_{self.n_sub_clusters}_layers_{self.nn_layers}"
 
 
 # query time 1%: 0.014361327789875485
