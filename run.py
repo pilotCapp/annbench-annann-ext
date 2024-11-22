@@ -16,9 +16,6 @@ log = logging.getLogger(__name__)
 def main(cfg: DictConfig) -> None:
     print(OmegaConf.to_yaml(cfg))
 
-    # Instantiate a search algorithm class
-    algo = annbench.instantiate_algorithm(name=cfg.algo.name)
-
     # Instantiate a dataset class
     # https://hydra.cc/docs/tutorial/working_directory#original-working-directory
     dataset = annbench.instantiate_dataset(
@@ -27,6 +24,9 @@ def main(cfg: DictConfig) -> None:
 
     ret_all = []
     for param_index in cfg.algo.param_index:
+
+        # Instantiate a search algorithm class
+        algo = annbench.instantiate_algorithm(name=cfg.algo.name)
 
         algo.set_index_param(param=param_index)
 
@@ -43,25 +43,36 @@ def main(cfg: DictConfig) -> None:
             exist_ok=True, parents=True
         )  # Make sure the parent directory exists
 
-        if algo.name:
+        if cfg.algo.name == "annann" or cfg.algo.name == "annann_2":
+            print("algo is annann")
             algo.path = str(p)
-
-        algo.normalizer.fit(dataset.vecs_train())
+        elif cfg.algo.name == "annann_base":
+            print("algo is annann_base")
+            algo.path = str(p)
 
         ## should probably split this for index and model
         # Build the index, or read the index if it has been already built
         if os.path.exists(os.path.join(p, "index.pkl")) and not algo.has_train():
             log.info("The index already exists. Read it")
             algo.read(path=str(p), D=dataset.D())
+            if cfg.algo.name == "annann" or cfg.algo.name == "annann_2":
+                algo.normalizer.fit(dataset.vecs_train())
+
         else:
             print("index does not exist")
             t0 = time.time()
             memory_usage_before = algo.get_memory_usage()
 
             log.info("Start to train")
-            algo.train(  # training model, checks nativly if model exists
-                vecs=dataset.vecs_train(), path=p
-            )  # added path to save the model for annan, probably results in error for other algorithms
+            if cfg.algo.name == "annann" or cfg.algo.name == "annann_2":
+                algo.train(  # training model, checks nativly if model exists
+                    vecs=dataset.vecs_train(), path=str(p)
+                )
+            else:
+                algo.train(  # training model, checks nativly if model exists
+                    vecs=dataset.vecs_train()
+                )  # added path to save the model for annan, probably results in error for other algorithms
+
             log.info("Start to add")
             algo.add(vecs=dataset.vecs_base())
             build_time = time.time() - t0

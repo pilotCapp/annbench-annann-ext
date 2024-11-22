@@ -11,4 +11,4 @@ interim: ./interim
 output: ./output
 
 # flags
-num_trial: 10
+num_trial: 100

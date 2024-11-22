@@ -49,6 +49,12 @@ def instantiate_algorithm(name):
     if name == "annann":
         from annbench.algo.annann import ANNANN
         return ANNANN()
+    elif name == "annann_2":
+        from annbench.algo.annann_2 import ANNANN_2
+        return ANNANN_2()
+    elif name == "annann_base":
+        from annbench.algo.annann_base import ANNANN_BASE
+        return ANNANN_BASE()
     elif name == "annoy":
         return AnnoyANN()
     elif name == "ivfpq":

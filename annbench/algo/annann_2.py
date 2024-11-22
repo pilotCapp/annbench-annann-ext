@@ -13,7 +13,6 @@ import time
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import joblib
 from .hnsw import HnswANN
-from sklearn.model_selection import train_test_split
 
 
 def soft_cluster_assignments(z, cluster_centers, alpha=1.0):
@@ -68,15 +67,13 @@ def dec_loss(encoder, cluster_centers, alpha=1.0):
     return loss_function
 
 
-class ANNANN(BaseANN):
+class ANNANN_2(BaseANN):
     def __init__(self):
         self.input_dim = 128  # only for sift
-        self.name = "annann_2"
+        self.name = "annann"
         self.index = {}
-        self.nn_layers = 3
+        self.nn_layers = 4
         self.isdynamic=False
-        self.test_size = 0.1
-
 
         self.n_sub_clusters = 1000
 
@@ -89,12 +86,16 @@ class ANNANN(BaseANN):
         self.path = None
 
         # self.cluster_algorithm = KMeans(n_clusters=self.n_sub_clusters)
-        self.cluster_algorithm = KMeans(n_clusters=self.n_sub_clusters)
+        self.cluster_algorithm = KMeans(
+            n_clusters=self.n_sub_clusters
+        )
 
         self.hnsw = HnswANN()  # use HNSW for cluster lookup
         self.hnsw.set_index_param({"ef_construction": self.ef_search * 2, "M": 8})
 
         self.normalizer = MinMaxScaler()
+
+        self.train_size = 1
 
         self.query_runs = 0
         self.query_time_1 = 0
@@ -145,12 +146,9 @@ class ANNANN(BaseANN):
             self.encode(np.zeros((1, self.input_dim)))
         else:
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
-
-
-            vecs_train, vecs_test = train_test_split(
-                normalized_vecs, test_size=self.test_size, random_state=42
-            )
-
+            normalized_vecs = normalized_vecs[
+                : int(len(normalized_vecs) * self.train_size)
+            ]  # train_size is the fraction of the data the model should be trained on, to test how the model performs on new data
             # take only the first n_size elements
             input_dim = normalized_vecs.shape[1]
             input_vec = tf.keras.layers.Input(shape=(input_dim,))
@@ -198,15 +196,14 @@ class ANNANN(BaseANN):
             self.autoencoder.compile(optimizer="adam", loss="mean_squared_error")
             # Define early stopping
             early_stopping_initial = tf.keras.callbacks.EarlyStopping(
-                monitor="val_loss", patience=3, restore_best_weights=True
+                monitor="loss", patience=3, restore_best_weights=True
             )
             print("encoder output shape:", self.encoder.output_shape)
 
             # Add early stopping as a callback
             self.autoencoder.fit(
-                x=vecs_train,
-                y=vecs_train,
-                validation_data=(vecs_test,vecs_test),
+                normalized_vecs,
+                normalized_vecs,
                 epochs=100,
                 batch_size=64,
                 callbacks=[early_stopping_initial],
@@ -217,23 +214,22 @@ class ANNANN(BaseANN):
             )  # predicint sub_cluster positions
 
             sub_cluster_centers = self.cluster_algorithm.fit(
-                normalized_vecs
+                predictions
             ).cluster_centers_
 
-            sub_cluster_centers_embedded = self.encoder.predict(sub_cluster_centers)
+            # sub_cluster_centers_embedded = self.encoder.predict(sub_cluster_centers)
 
             early_stopping_final = tf.keras.callbacks.EarlyStopping(
-                monitor="val_loss", patience=6, restore_best_weights=True
+                monitor="loss", patience=3, restore_best_weights=True
             )
 
             self.autoencoder.compile(
                 optimizer="adam",
-                loss=dec_loss(self.encoder, sub_cluster_centers_embedded),
+                loss=dec_loss(self.encoder, sub_cluster_centers),
             )
             self.autoencoder.fit(
-                x=vecs_train,
-                y=vecs_train,
-                validation_data=(vecs_test,vecs_test),
+                normalized_vecs,
+                normalized_vecs,
                 epochs=20,
                 batch_size=64,
                 callbacks=[early_stopping_final],
@@ -269,9 +265,7 @@ class ANNANN(BaseANN):
             self.index[cluster_index][1].append(vec)
 
         self.centroids = np.array(centroids)
-        self.centroids_decoded = self.normalizer.inverse_transform(
-            self.decode(self.centroids).numpy()
-        )
+        self.centroids_decoded = self.normalizer.inverse_transform(self.decode(self.centroids).numpy())
 
         print("cluster centroids length", len(self.centroids))
         self.hnsw.add(self.centroids)
@@ -419,14 +413,14 @@ class ANNANN(BaseANN):
     def stringify_index_param(self, param):
         """Convert index parameters to a string representation."""
         print(self.encoding_dim)
-        return f"test_size_{self.test_size}_encodingdim_{self.encoding_dim}_clusters_{self.n_sub_clusters}_layers_{self.nn_layers}_dynamic_{self.isdynamic}"
+        return f"train_size_{self.train_size}_encodingdim_{self.encoding_dim}_clusters_{self.n_sub_clusters}_layers_{self.nn_layers}_dynamic_{self.isdynamic}"
 
 
 # query time 1%: 0.07688888739751326
 # query time 2%: 0.11602366853797023
 # query time 3%: 0.8070874440645165
 
-# query time 3_1%: 0.13722583539672958
+# uery time 3_1%: 0.13722583539672958
 
 # query time 3_2%: 0.28620613149015445
 
