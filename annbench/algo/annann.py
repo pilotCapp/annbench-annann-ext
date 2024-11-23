@@ -71,16 +71,15 @@ def dec_loss(encoder, cluster_centers, alpha=1.0):
 class ANNANN(BaseANN):
     def __init__(self):
         self.input_dim = 128  # only for sift
-        self.name = "annann_2"
+        self.name = "annann"
         self.index = {}
-        self.nn_layers = 3
+        self.nn_layers = 4
         self.isdynamic=False
         self.test_size = 0.1
 
+        self.n_sub_clusters = 100000
 
-        self.n_sub_clusters = 1000
-
-        self.ef_search = 50
+        self.ef_search = 100
 
         self.encoding_dim = 0.25
         self.autoencoder = None
@@ -88,11 +87,25 @@ class ANNANN(BaseANN):
         self.decoder = None
         self.path = None
 
+        # Parameters
+        n_clusters = 50000
+        max_iter = 100
+        batch_size = 10000  # Adjust this based on memory and stability
+        max_no_improvement = 10  # Stop if no improvement
+
+        self.cluster_algorithm = MiniBatchKMeans(
+            n_clusters=n_clusters,
+            max_iter=max_iter,
+            batch_size=batch_size,
+            max_no_improvement=max_no_improvement,
+            init="k-means++",
+            random_state=42,
+            verbose=1,
+        )
         # self.cluster_algorithm = KMeans(n_clusters=self.n_sub_clusters)
-        self.cluster_algorithm = KMeans(n_clusters=self.n_sub_clusters)
 
         self.hnsw = HnswANN()  # use HNSW for cluster lookup
-        self.hnsw.set_index_param({"ef_construction": self.ef_search * 2, "M": 8})
+        self.hnsw.set_index_param({"ef_construction": self.ef_search * 2, "M": 16})
 
         self.normalizer = MinMaxScaler()
 
@@ -145,7 +158,6 @@ class ANNANN(BaseANN):
             self.encode(np.zeros((1, self.input_dim)))
         else:
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
-
 
             vecs_train, vecs_test = train_test_split(
                 normalized_vecs, test_size=self.test_size, random_state=42
@@ -212,15 +224,17 @@ class ANNANN(BaseANN):
                 callbacks=[early_stopping_initial],
             )
 
-            predictions = self.encoder.predict(
+            print("predicting embedded vectors")
+            predictions = self.encode(
                 normalized_vecs
-            )  # predicint sub_cluster positions
+            ).numpy()  # predicint sub_cluster positions
 
+            print("creating cluster centroids")
             sub_cluster_centers = self.cluster_algorithm.fit(
-                normalized_vecs
+                predictions
             ).cluster_centers_
 
-            sub_cluster_centers_embedded = self.encoder.predict(sub_cluster_centers)
+            #sub_cluster_centers_embedded = self.encoder.predict(sub_cluster_centers)
 
             early_stopping_final = tf.keras.callbacks.EarlyStopping(
                 monitor="val_loss", patience=6, restore_best_weights=True
@@ -228,7 +242,7 @@ class ANNANN(BaseANN):
 
             self.autoencoder.compile(
                 optimizer="adam",
-                loss=dec_loss(self.encoder, sub_cluster_centers_embedded),
+                loss=dec_loss(self.encoder, sub_cluster_centers),
             )
             self.autoencoder.fit(
                 x=vecs_train,
