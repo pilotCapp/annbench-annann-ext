@@ -74,7 +74,7 @@ class ANNANN(BaseANN):
         self.name = "annann"
         self.index = {}
         self.nn_layers = 4
-        self.isdynamic=False
+        self.isdynamic = False
         self.test_size = 0.1
 
         self.n_sub_clusters = 50000
@@ -130,6 +130,9 @@ class ANNANN(BaseANN):
 
         self.normalizer.fit(vecs)
         normalized_vecs = self.normalizer.transform(vecs)
+
+        if self.isdynamic:
+            normalized_vecs = normalized_vecs[: int(len(normalized_vecs) / 2)]
 
         if os.path.exists(model_path):
             print("model already exists")
@@ -217,7 +220,7 @@ class ANNANN(BaseANN):
             self.autoencoder.fit(
                 x=vecs_train,
                 y=vecs_train,
-                validation_data=(vecs_test,vecs_test),
+                validation_data=(vecs_test, vecs_test),
                 epochs=100,
                 batch_size=64,
                 callbacks=[early_stopping_initial],
@@ -233,7 +236,7 @@ class ANNANN(BaseANN):
                 predictions
             ).cluster_centers_
 
-            #sub_cluster_centers_embedded = self.encoder.predict(sub_cluster_centers)
+            # sub_cluster_centers_embedded = self.encoder.predict(sub_cluster_centers)
 
             early_stopping_final = tf.keras.callbacks.EarlyStopping(
                 monitor="val_loss", patience=6, restore_best_weights=True
@@ -246,7 +249,7 @@ class ANNANN(BaseANN):
             self.autoencoder.fit(
                 x=vecs_train,
                 y=vecs_train,
-                validation_data=(vecs_test,vecs_test),
+                validation_data=(vecs_test, vecs_test),
                 epochs=20,
                 batch_size=64,
                 callbacks=[early_stopping_final],
@@ -266,14 +269,16 @@ class ANNANN(BaseANN):
         encoded_vecs = self.encode(normalized_vecs).numpy()
 
         if self.isdynamic:
-            self.cluster_algorithm.fit(encoded_vecs[: int(len(encoded_vecs)/2)])
+            self.cluster_algorithm.fit(encoded_vecs[: int(len(encoded_vecs) / 2)])
         else:
             self.cluster_algorithm.fit(encoded_vecs)
 
         cluster_assignments = self.cluster_algorithm.predict(encoded_vecs)
         centroids = self.cluster_algorithm.cluster_centers_
 
-        self.index = {i:[[],[]] for i in range(len(centroids))}  # TODO change to ssd read/write
+        self.index = {
+            i: [[], []] for i in range(len(centroids))
+        }  # TODO change to ssd read/write
 
         for k, (vec, cluster_index) in enumerate(zip(vecs, cluster_assignments)):
             if cluster_index not in self.index:
