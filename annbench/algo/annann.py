@@ -77,7 +77,7 @@ class ANNANN(BaseANN):
         self.isdynamic=False
         self.test_size = 0.1
 
-        self.n_sub_clusters = 100000
+        self.n_sub_clusters = 50000
 
         self.ef_search = 100
 
@@ -88,13 +88,12 @@ class ANNANN(BaseANN):
         self.path = None
 
         # Parameters
-        n_clusters = 50000
         max_iter = 100
         batch_size = 10000  # Adjust this based on memory and stability
         max_no_improvement = 10  # Stop if no improvement
 
         self.cluster_algorithm = MiniBatchKMeans(
-            n_clusters=n_clusters,
+            n_clusters=self.n_sub_clusters,
             max_iter=max_iter,
             batch_size=batch_size,
             max_no_improvement=max_no_improvement,
@@ -274,7 +273,7 @@ class ANNANN(BaseANN):
         cluster_assignments = self.cluster_algorithm.predict(encoded_vecs)
         centroids = self.cluster_algorithm.cluster_centers_
 
-        self.index = {}  # TODO change to ssd read/write
+        self.index = {i:[[],[]] for i in range(len(centroids))}  # TODO change to ssd read/write
 
         for k, (vec, cluster_index) in enumerate(zip(vecs, cluster_assignments)):
             if cluster_index not in self.index:

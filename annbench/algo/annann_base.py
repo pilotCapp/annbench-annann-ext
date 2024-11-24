@@ -21,9 +21,9 @@ class ANNANN_BASE(BaseANN):
         self.index = {}
         self.isdynamic=False
 
-        self.n_sub_clusters = 1000
+        self.n_sub_clusters = 50000
 
-        self.ef_search = 50
+        self.ef_search = 100
 
         self.path = None
 
@@ -33,7 +33,7 @@ class ANNANN_BASE(BaseANN):
 
         self.hnsw = HnswANN()  # use HNSW for cluster lookup
 
-        self.hnsw.set_index_param({"ef_construction": self.ef_search * 2, "M": 8})
+        self.hnsw.set_index_param({"ef_construction": self.ef_search * 2, "M": 16})
 
         self.train_size = 1
 
