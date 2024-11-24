@@ -28,3 +28,6 @@ The current implementation does not utilize disk storage for clusters, as this w
 As the algorithm is written in Python, even with as much tensorflow and numpy optimization as possible, the implementation language could still affect the results. Therefore benchmarking it against other more optimized algorithms would be meaningless. Instead a similar benchmark algorithm was constructed wich utilizes the same index generation and querying over the first and second step, only n the original space not an embedded. This would better show the differences in search resulting from a learned vector space.
 
 ### TODO
+
+![sift1m](result_img/annann_images/sift1m_dynamic_v_static.png)
+
