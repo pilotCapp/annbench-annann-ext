@@ -1,3 +1,7 @@
+# This repository is a fork of the original annbench benchmarking library
+## It is used to generate and benchmark the annann algorithm
+Read README-ANNANN for more information about the implementation of the algorithm
+
 # annbench: a lightweight benchmark for approximate nearest neighbor search
 
 `annbench` is a simple benchmark for approximate nearest neighbor search algorithms in Python. This repository design is strongly influenced by a great project, [ann-benchmarks](https://github.com/erikbern/ann-benchmarks), that provides comprehensive and thorough benchmarks for various algorithms. In contrast, we aim to deliver more lightweight and straightforward scripts with the following features.
