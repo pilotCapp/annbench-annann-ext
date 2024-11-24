@@ -69,11 +69,11 @@ class ANNANN_BASE(BaseANN):
         cluster_assignments = self.cluster_algorithm.predict(vecs)
         centroids = self.cluster_algorithm.cluster_centers_
 
-        self.index = {}  # TODO change to ssd read/write
+        self.index = {
+            i: [[], []] for i in range(len(centroids))
+        }  # TODO change to ssd read/write
 
         for k, (vec, cluster_index) in enumerate(zip(vecs, cluster_assignments)):
-            if cluster_index not in self.index:
-                self.index[cluster_index] = [[], []]
             self.index[cluster_index][0].append(k)
             self.index[cluster_index][1].append(vec)
 
