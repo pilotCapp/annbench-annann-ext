@@ -27,9 +27,7 @@ class ANNANN_BASE(BaseANN):
 
         self.path = None
 
-        self.cluster_algorithm = KMeans(
-            n_clusters=self.n_sub_clusters
-        )
+        self.cluster_algorithm = MiniBatchKMeans(n_clusters=self.n_sub_clusters)
 
         self.hnsw = HnswANN()  # use HNSW for cluster lookup
 
