@@ -14,6 +14,7 @@ from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import joblib
 from .hnsw import HnswANN
 from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
 
 
 def soft_cluster_assignments(z, cluster_centers, alpha=1.0):
@@ -275,6 +276,50 @@ class ANNANN(BaseANN):
 
         cluster_assignments = self.cluster_algorithm.predict(encoded_vecs)
         centroids = self.cluster_algorithm.cluster_centers_
+
+        # Compute the number of entries in each cluster
+        counts = np.bincount(cluster_assignments)
+        clusters = np.arange(len(counts))
+
+        counts_zero = np.sum(counts == 0)
+        counts_five = np.sum(counts <= 5)
+        print(
+            f"amount clusters zero:{counts_zero}, amount clusters five or less:{counts_five}"
+        )
+
+        # Sort the clusters by counts in descending order
+        sorted_indices = np.argsort(counts)[::-1]  # Use [::-1] for descending order
+        sorted_clusters = clusters[sorted_indices]
+        sorted_counts = counts[sorted_indices]
+
+        # Plot the distribution using Matplotlib
+        plt.figure(figsize=(12, 6))
+
+        # Use sequential x positions
+        x_positions = range(len(sorted_counts))
+
+        plt.bar(x_positions, sorted_counts, color="skyblue")
+        plt.xlabel("Cluster Index (sorted)", fontsize=14)
+        plt.ylabel("Number of Entries", fontsize=14)
+        plt.title("Distribution of Number of Entries per Cluster", fontsize=16)
+
+        # Set the x-ticks to be at the sequential positions with labels as sorted cluster indices
+        plt.xticks(
+            x_positions, labels=sorted_clusters, rotation=45
+        )  # Rotate labels if necessary
+
+        # **Add a horizontal line at y=20**
+        plt.axhline(
+            y=20, color="red", linestyle="--", linewidth=2, label="Threshold = 20"
+        )
+
+        # Optional: Add a legend to describe the horizontal line
+        plt.legend()
+
+        plt.tight_layout()
+
+        os.makedirs(path, exist_ok=True)
+        plt.savefig(f"{self.path}/cluster_spread_{self.isdynamic}.png")
 
         self.index = {
             i: [[], []] for i in range(len(centroids))
