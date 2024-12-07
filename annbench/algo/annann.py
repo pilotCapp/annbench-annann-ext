@@ -78,7 +78,7 @@ class ANNANN(BaseANN):
         self.isdynamic = False
         self.test_size = 0.1
 
-        self.n_sub_clusters = 50000
+        self.n_sub_clusters = 1000
 
         self.ef_search = 100
 
@@ -229,8 +229,18 @@ class ANNANN(BaseANN):
 
             print("predicting embedded vectors")
             predictions = self.encode(
-                normalized_vecs
+                vecs_train
             ).numpy()  # predicint sub_cluster positions
+
+            self.hnsw.add(vecs_train)
+            neighbours_indices = self.hnsw.query(
+                vecs_train,
+                1,  # number of closest neighbours
+                {"ef": 50},
+            ).flatten()
+
+            closest_vectors = predictions[neighbours_indices]
+            midpoints = (predictions + closest_vectors) / 2
 
             print("creating cluster centroids")
             sub_cluster_centers = self.cluster_algorithm.fit(
@@ -245,7 +255,7 @@ class ANNANN(BaseANN):
 
             self.autoencoder.compile(
                 optimizer="adam",
-                loss=dec_loss(self.encoder, sub_cluster_centers),
+                loss=dec_loss(self.encoder, midpoints),
             )
             self.autoencoder.fit(
                 x=vecs_train,
@@ -318,7 +328,7 @@ class ANNANN(BaseANN):
 
         plt.tight_layout()
 
-        os.makedirs(path, exist_ok=True)
+        os.makedirs(self.path, exist_ok=True)
         plt.savefig(f"{self.path}/cluster_spread_{self.isdynamic}.png")
 
         self.index = {

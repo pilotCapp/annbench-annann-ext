@@ -22,7 +22,7 @@ class ANNANN_BASE(BaseANN):
         self.index = {}
         self.isdynamic=False
 
-        self.n_sub_clusters = 50000
+        self.n_sub_clusters = 1000
 
         self.ef_search = 100
 
@@ -109,7 +109,7 @@ class ANNANN_BASE(BaseANN):
 
         plt.tight_layout()
 
-        os.makedirs(path, exist_ok=True)
+        os.makedirs(self.path, exist_ok=True)
         plt.savefig(f"{self.path}/cluster_spread_{self.isdynamic}.png")
 
         self.index = {
