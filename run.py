@@ -136,13 +136,8 @@ def main(cfg: DictConfig) -> None:
         yaml.dump(ret_all, f)
 
     # (3) Print test results
-    time_sum = algo.query_time_1 + algo.query_time_2 + algo.query_time_3
-    print(f"query time 1%: {algo.query_time_1/time_sum}")
-    print(f"query time 2%: {algo.query_time_2/time_sum}")
-    print(f"query time 3%: {algo.query_time_3/time_sum}")
-    print(f"\nquery time 3_1%: {algo.query_time_3_1/algo.query_time_3}")
-    print(f"\nquery time 3_2%: {algo.query_time_3_2/algo.query_time_3}")
-    print(f"\nquery time 3_3%: {algo.query_time_3_3/algo.query_time_3}")
+    if algo.query_time_1 > 0:
+        algo.time_log()
 
 
 if __name__ == "__main__":

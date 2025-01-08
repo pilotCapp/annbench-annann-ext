@@ -18,7 +18,7 @@ class LinearANN(BaseANN):
 
     def query(self, vecs, topk, param):
         faiss.omp_set_num_threads(1)  # Make sure this is on a single thread mode
-        _, ids = self.index.search(x=vecs, k=topk)
+        distances, ids = self.index.search(x=vecs, k=topk)
         return ids
 
     def write(self, path):

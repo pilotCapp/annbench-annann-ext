@@ -1,0 +1,10 @@
+# @package _group_
+
+name: linear_adaptive
+
+param_index:
+  - Partitions: 1
+
+param_query:
+  dummy:
+    - 0

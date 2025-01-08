@@ -52,6 +52,12 @@ def instantiate_algorithm(name):
     elif name == "annann_base":
         from annbench.algo.annann_base import ANNANN_BASE
         return ANNANN_BASE()
+    elif name == "linear_python":
+        from annbench.algo.linear import Linear
+        return Linear()
+    elif name == "linear_adaptive":
+        from annbench.algo.linear_adaptive import Linear_Adaptive
+        return Linear_Adaptive()
     elif name == "annoy":
         return AnnoyANN()
     elif name == "ivfpq":
