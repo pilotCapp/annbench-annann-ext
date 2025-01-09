@@ -3,7 +3,10 @@
 name: linear_adaptive
 
 param_index:
-  - Partitions: 1
+  - is_adaptive: True
+  - is_adaptive: False
+
+
 
 param_query:
   dummy:

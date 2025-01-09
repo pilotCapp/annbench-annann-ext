@@ -16,10 +16,13 @@ class LinearANN(BaseANN):
         self.index = faiss.IndexFlatL2(vecs.shape[1])
         self.index.add(vecs)
 
-    def query(self, vecs, topk, param):
+    def query(self, vecs, topk, param, ret_distances=False):
         faiss.omp_set_num_threads(1)  # Make sure this is on a single thread mode
         distances, ids = self.index.search(x=vecs, k=topk)
-        return ids
+        if ret_distances:
+            return ids, distances
+        else:
+            return ids
 
     def write(self, path):
         faiss.write_index(self.index, path)

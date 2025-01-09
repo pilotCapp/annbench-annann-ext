@@ -50,37 +50,22 @@ def main(cfg: DictConfig) -> None:
             print("algo is annann_base")
             algo.path = str(p)
 
-        ## should probably split this for index and model
-        # Build the index, or read the index if it has been already built
-        if os.path.exists(os.path.join(p, "index.pkl")) and not algo.has_train():
-            log.info("The index already exists. Read it")
-            algo.read(path=str(p), D=dataset.D())
-            if cfg.algo.name == "annann" or cfg.algo.name == "annann_2":
-                algo.normalizer.fit(dataset.vecs_train())
+        if algo.has_train():
+            algo.train(vecs=dataset.vecs_train(), path=str(p))
 
-        else:
-            print("index does not exist")
-            t0 = time.time()
-            memory_usage_before = algo.get_memory_usage()
-
-            log.info("Start to train")
-            if cfg.algo.name == "annann" or cfg.algo.name == "annann_2":
-                algo.train(  # training model, checks nativly if model exists
-                    vecs=dataset.vecs_train(), path=str(p)
-                )
-            else:
-                algo.train(  # training model, checks nativly if model exists
-                    vecs=dataset.vecs_train()
-                )  # added path to save the model for annan, probably results in error for other algorithms
-
-            log.info("Start to add")
+        if not os.path.exists(os.path.join(p, "index.pickle")):
+            log.info("The index does not exist")
             algo.add(vecs=dataset.vecs_base())
-            build_time = time.time() - t0
-            index_size = algo.get_memory_usage() - memory_usage_before
-            print(f"Index build time: {build_time:.2f} sec")
-            print(f"Index size: {index_size / 1024 / 1024:.2f} MB")
-
             algo.write(path=str(p))
+        else:
+            log.info("The index exists")
+            algo.read(path=str(p), D=dataset.D())
+        if (
+            cfg.algo.name == "annann"
+            or cfg.algo.name == "annann_2"
+            or cfg.algo.name == "linear_adaptive"
+        ):
+            algo.normalizer.fit(dataset.vecs_train())
 
         ret = []
         # Run search for each param_query
