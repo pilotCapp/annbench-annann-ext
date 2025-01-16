@@ -51,7 +51,10 @@ def main(cfg: DictConfig) -> None:
             algo.path = str(p)
 
         if algo.has_train():
-            algo.train(vecs=dataset.vecs_train(), path=str(p))
+            algo.train(vecs=dataset.vecs_base(), path=str(p))
+            algo.add(vecs=dataset.vecs_base())
+            algo.write(path=str(p))
+            
 
         if not os.path.exists(os.path.join(p, "index.pickle")):
             log.info("The index does not exist")
@@ -65,7 +68,7 @@ def main(cfg: DictConfig) -> None:
             or cfg.algo.name == "annann_2"
             or cfg.algo.name == "linear_adaptive"
         ):
-            algo.normalizer.fit(dataset.vecs_train())
+            algo.normalizer.fit(dataset.vecs_base())
 
         ret = []
         # Run search for each param_query
