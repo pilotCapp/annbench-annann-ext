@@ -3,9 +3,35 @@ import pickle
 
 from .base import BaseANN
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dense
+from tensorflow.keras.layers import Input, Dense, Lambda
 from tensorflow.keras import backend as K
 from tensorflow.keras import optimizers
+
+import multiprocessing
+
+num_threads = multiprocessing.cpu_count()
+print(num_threads)
+
+import faiss
+from .faiss_cpu import LinearANN
+faiss.omp_set_num_threads(32)  # Default to the max available threads
+
+from .hnsw import HnswANN
+
+
+print("TF num physical CPUs:", tf.config.experimental.list_physical_devices('CPU'))
+print("TF num logical CPUs:", tf.config.threading.get_intra_op_parallelism_threads())
+print("TF num inter-op threads:", tf.config.threading.get_inter_op_parallelism_threads())
+
+tf.config.threading.set_intra_op_parallelism_threads(32)  # Number of threads for individual ops
+tf.config.threading.set_inter_op_parallelism_threads(16)  # Number of threads for parallel ops
+
+print("TF num physical CPUs:", tf.config.experimental.list_physical_devices('CPU'))
+print("TF num logical CPUs:", tf.config.threading.get_intra_op_parallelism_threads())
+print("TF num inter-op threads:", tf.config.threading.get_inter_op_parallelism_threads())
+
+
+tf.config.optimizer.set_jit(True)  # Enable XLA
 
 
 import numpy as np
@@ -17,24 +43,32 @@ import joblib
 from sklearn.model_selection import train_test_split
 
 
-from .faiss_cpu import LinearANN
-
-
-def contrastive_loss(y_true, y_pred):
-    return K.mean(K.square(y_true - y_pred))
-
-
-# Custom training step to handle pairs of vectors
 @tf.function
-def train_step(encoder, optimizer, x1, x2, y):
-    with tf.GradientTape() as tape:
-        encoded_x1 = encoder(x1, training=True)
-        encoded_x2 = encoder(x2, training=True)
-        distances = K.sqrt(K.sum(K.square(encoded_x1 - encoded_x2), axis=1))
-        loss = contrastive_loss(y, distances)
-    gradients = tape.gradient(loss, encoder.trainable_variables)
-    optimizer.apply_gradients(zip(gradients, encoder.trainable_variables))
-    return loss
+def contrastive_loss(y_true, d_pred, margin=1.0):
+    # Reshape y_true to match d_pred shape
+    y_true = tf.reshape(y_true, tf.shape(d_pred))  # Match shape to d_pred
+
+    y_true = tf.reshape(y_true, tf.shape(d_pred))
+    positive_loss = y_true * tf.square(d_pred)
+    negative_loss = (1 - y_true) * tf.square(tf.maximum(0.0, margin - d_pred))
+    return tf.reduce_mean(positive_loss + negative_loss)
+
+
+@tf.function
+def distance_layer(tensors):
+    emb1, emb2, emb3 = tensors
+    
+    return tf.norm(emb1 - emb3 +5e-9, axis=1, keepdims=True) + tf.norm(emb2 - emb3 +5e-9, axis=1, keepdims=True)
+    #(tf.norm(emb1 - emb2, axis=1, keepdims=True), tf.reduce_sum(emb1 * emb2, axis=1, keepdims=True))
+
+@tf.function
+def weighted_mse_loss(y_true, y_pred):
+    # Example weight: inverse proportional to true distance (add epsilon to avoid division by zero)
+    weights = 1 / (tf.norm(y_true)+1e-8)
+    return tf.reduce_mean(weights * tf.square(y_pred - y_true))
+
+
+
 
 
 class Linear_Adaptive(BaseANN):
@@ -42,7 +76,6 @@ class Linear_Adaptive(BaseANN):
         self.index = None
         self.index_norms = None
         self.ANN = LinearANN()
-        self.ANN_2 = LinearANN()
 
         self.full_dim = 128
         self.partition_dim = 64
@@ -67,25 +100,29 @@ class Linear_Adaptive(BaseANN):
         self.partitions = 2
 
         self.train_size = 0.9
-        self.isadaptive = True
+        self.is_adaptive = True
         self.nn_layers = 2
 
         self.path = None
         self.encoder = None
         self.normalizer = StandardScaler()
 
+        self.pair_ann = HnswANN()  # use HNSW for cluster lookup
+        self.pair_ann.set_index_param({"ef_construction": 300, "M": 32})
+
+
     def set_index_param(self, param):
-        self.isadaptive = param["is_adaptive"]
+        self.is_adaptive = param["is_adaptive"]
 
     def train(self, vecs, path):
         self.path = path
-        model_path = os.path.join(path, "model.keras")
+        model_path = os.path.join(path, "../model.keras")
 
         if os.path.exists(model_path):
             print("model already exists")
             self.encoder = tf.keras.models.load_model(model_path)
 
-            self.normalizer = joblib.load(os.path.join(path, "normalizer.pkl"))
+            self.normalizer = joblib.load(os.path.join(path, "../normalizer.pkl"))
             print(
                 "encoder retrieved with input/output shape",
                 self.encoder.input_shape,
@@ -103,8 +140,10 @@ class Linear_Adaptive(BaseANN):
 
             # take only the first n_size elements
             self.full_dim = normalized_vecs.shape[1]
+            
             self.partition_dim = int(self.full_dim / self.partitions)
             input_vec = Input(shape=(self.full_dim,))
+            
             print("input dim is", self.full_dim)
 
             # Calculate the sizes of the encoder layers
@@ -113,72 +152,132 @@ class Linear_Adaptive(BaseANN):
             # Build the encoder
             encoded = input_vec
             for layer in range(self.nn_layers):
-                encoded = Dense(self.full_dim, activation="relu")(encoded)
+                encoded = Dense(self.full_dim, activation="linear")(encoded)
 
             # Use 'sigmoid' activation in the final layer if your input data is normalized between 0 and 1
-            encoded = Dense(self.full_dim, activation="relu")(encoded)
+            encoded = Dense(self.full_dim, activation="linear")(encoded)
 
             # Define the encoder model
-            self.encoder = tf.keras.Model(input_vec, encoded)
+            shared_encoder = tf.keras.Model(input_vec, encoded)
 
-            print("making pairs")
 
-            pairs = np.array(
-                [
-                    (vecs_train[i], vecs_train[j])
-                    for i in range(len(vecs_train))
-                    for j in np.random.choice(len(vecs_train), 50)
-                ]
+            input_vec_1 = Input(shape=(self.full_dim,))
+            input_vec_2 = Input(shape=(self.full_dim,))
+            input_vec_3 = Input(shape=(self.full_dim,))
+            
+
+            emb_1 = shared_encoder(input_vec_1)
+            emb_2 = shared_encoder(input_vec_2)
+            emb_3 = shared_encoder(input_vec_3)
+
+            distance = Lambda(distance_layer)([emb_1, emb_2, emb_3])
+            distance_model = tf.keras.Model(inputs=[input_vec_1, input_vec_2, input_vec_3], outputs=distance)
+
+            optimizer = tf.keras.optimizers.Adam()
+            
+            distance_model.compile(optimizer=optimizer, loss = weighted_mse_loss)
+
+
+            batch_size = 512
+            epochs = 100
+            n_pairs_closest = 101
+            n_pairs_random =21
+
+            ##MAKING PAIRS
+            self.pair_ann.add(vecs_train)
+            closest= self.pair_ann.query(vecs_train,n_pairs_closest,param ={"ef": 150})
+            
+            closest=closest[:,1:]
+                        
+
+
+            # Closest entries training instance
+            indices_train_closest = closest
+            indices_train_random = np.random.choice(len(vecs_train), (len(vecs_train), n_pairs_random))
+
+            # Shuffle the appended array
+            x1_train_closest = np.repeat(vecs_train, n_pairs_closest-1, axis=0)
+            x2_train_closest = vecs_train[indices_train_closest.flatten()]
+            x3_train_closest = (x2_train_closest+x1_train_closest)/2
+            y_train_closest=np.linalg.norm(x1_train_closest - x2_train_closest, axis=1, keepdims=True).astype(np.float32)
+            
+            x1_train_random = np.repeat(vecs_train, n_pairs_random, axis=0)
+            x2_train_random = vecs_train[indices_train_random.flatten()]
+            y_train_random = np.linalg.norm(x1_train_random - x2_train_random, axis=1, keepdims=True).astype(np.float32)
+
+            x1_train = np.concatenate((x1_train_closest, x1_train_random), axis=0)
+            x2_train = np.concatenate((x2_train_closest, x2_train_random), axis=0)
+            x3_train = (x2_train+x1_train)/2
+            
+            y_train = np.concatenate((y_train_closest, y_train_random), axis=0)
+
+            print(x1_train.shape,x2_train.shape,y_train.shape)
+
+            # Shuffle the combined pairs together
+            indices = np.arange(x1_train.shape[0])
+            np.random.shuffle(indices)
+            x1_train = x1_train[indices]
+            x2_train = x2_train[indices]
+            x3_train = x3_train[indices]
+            y_train= y_train[indices]
+            
+            #distance_train = np.linalg.norm(x1_train - x2_train, axis=1)
+            #dot_product_train = np.sum(x1_train * x2_train, axis=1)
+            #y_train = distance_train#(distance_train, dot_product_train)
+             
+
+
+            #validation test instance
+            indices_test = np.random.choice(len(vecs_test), (len(vecs_test), n_pairs_random))
+            x1_test = np.repeat(vecs_test, n_pairs_random, axis=0)
+            x2_test = vecs_test[indices_test.flatten()]
+
+            x3_test = (x2_test+x1_test)/2
+
+            
+            
+            distance_test = np.linalg.norm(x1_test - x2_test, axis=1)
+            dot_product_test = np.sum(x1_test * x2_test, axis=1)
+            y_test = np.linalg.norm(x1_test - x2_test, axis=1, keepdims=True).astype(np.float32)
+            
+            early_stopping = tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss", patience=5, restore_best_weights=True
+            )
+            
+
+
+            distance_model.fit([x1_train, x2_train, x3_train], y_train,validation_data=([x1_test, x2_test, x3_test], y_test), epochs=epochs,
+            batch_size=batch_size, callbacks=[early_stopping],)
+
+            distance_model.compile(optimizer=tf.keras.optimizers.Adam(), loss = weighted_mse_loss)
+            early_stopping = tf.keras.callbacks.EarlyStopping(
+                monitor="loss", patience=8, restore_best_weights=True
             )
 
-            np.random.shuffle(pairs)
+            distance_model.fit([x1_train_closest, x2_train_closest, x3_train_closest], y_train_closest, epochs=epochs,
+            batch_size=batch_size, callbacks=[early_stopping],)
 
-            x1 = pairs[:, 0]
-            x2 = pairs[:, 1]
-            y = np.linalg.norm(x1 - x2, axis=1)
-
-            epochs = 100
-            batch_size = 64
-            optimizer = tf.keras.optimizers.Adam()
-
-            # Training loop
-            for epoch in range(epochs):
-                epoch_loss = 0
-                for i in range(0, len(x1), batch_size):
-                    x1_batch = x1[i : i + batch_size]
-                    x2_batch = x2[i : i + batch_size]
-                    y_batch = y[i : i + batch_size]
-                    loss = train_step(
-                        self.encoder, optimizer, x1_batch, x2_batch, y_batch
-                    )
-                    epoch_loss += loss
-                    # print(f"Batch {i//batch_size+1}/{len(x1)//batch_size}, Loss: {loss}")
-
-                print(
-                    f"Epoch {epoch+1}/{epochs}, loss: {epoch_loss/(len(x1)/batch_size):.4f}"
-                )
-
+            self.encoder = shared_encoder
             self.encoder.save(model_path)
-            joblib.dump(self.normalizer, os.path.join(path, "normalizer.pkl"))
+            joblib.dump(self.normalizer, os.path.join(path, "../normalizer.pkl"))
             print("model saved")
 
     def has_train(self):
         print("checking if requires training")
-        print(self.isadaptive)
+        print(self.is_adaptive)
         return (
             not os.path.exists(
                 os.path.join(self.stringify_index_param({}), "model.keras")
             )
-        ) and self.isadaptive
+        )
 
     def add(self, vecs):
 
-        if self.isadaptive:
-            self.index = self.encoder.predict(self.normalizer.transform(vecs))
+        self.index = self.encoder.predict(self.normalizer.transform(vecs))
+        if self.is_adaptive:
+            self.ANN.add(self.index[:, : self.partition_dim])
         else:
-            self.index = vecs
-
-        self.ANN.add(self.index[:, : self.partition_dim])
+            self.ANN.add(self.index)
         # self.index_norms_1 = np.sum(self.index[:, : self.partition_dim] ** 2, axis=1)
         self.index_norms_2 = np.sum(self.index[:, self.partition_dim :] ** 2, axis=1)
 
@@ -201,11 +300,17 @@ class Linear_Adaptive(BaseANN):
         time_log = time.time()
         time_log_1 = time.time()
 
-        if self.isadaptive:
-            normalized_vecs = self.normalizer.transform(vecs)
-            encoded_vecs = self.encode(normalized_vecs).numpy()
-            vecs = encoded_vecs
+        normalized_vecs = self.normalizer.transform(vecs)
+        encoded_vecs = self.encode(normalized_vecs).numpy()
+        vecs = encoded_vecs
 
+        if not self.is_adaptive:
+            topk_indices = self.ANN.query(
+            vecs, topk, param, ret_distances=False
+            )
+            return topk_indices
+
+        
         self.query_time_1_1 += (
             time.time() - time_log_1
         )  # Time for initial distance calculation
@@ -233,7 +338,7 @@ class Linear_Adaptive(BaseANN):
         # candidates = np.argpartition(distances_1, topk * 10, axis=1)[:, : topk * 10]
 
         candidates, distances_1 = self.ANN.query(
-            vecs[:, : self.partition_dim], topk * 100, param, ret_distances=True
+            vecs[:, : self.partition_dim], topk * 1000, param, ret_distances=True
         )
 
         self.query_time_2_2 += (
@@ -324,7 +429,7 @@ class Linear_Adaptive(BaseANN):
             self.index = pickle.load(f)
         self.encoder = tf.keras.models.load_model(os.path.join(path, "model.keras"))
         self.ANN.read(os.path.join(path, "faiss_index.bin"), D)
-        self.normalizer = joblib.load(os.path.join(path, "normalizer.pkl"))
+        self.normalizer = joblib.load(os.path.join(path, "../normalizer.pkl"))
         self.index_norms_2 = pickle.load(
             open(os.path.join(path, "index_norms.pkl"), "rb")
         )
@@ -350,4 +455,4 @@ class Linear_Adaptive(BaseANN):
 
     def stringify_index_param(self, param):
         """Convert index parameters to a string representation."""
-        return f"train_size_{self.train_size}_layers_{self.nn_layers}_is_adaptive_{self.isadaptive}"
+        return f"train_size_{self.train_size}_layers_{self.nn_layers}_is_adaptive_{self.is_adaptive}"
