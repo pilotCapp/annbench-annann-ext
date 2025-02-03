@@ -382,7 +382,7 @@ class Linear_Adaptive(BaseANN):
         print(self.is_adaptive)
         return (
             not os.path.exists(
-                os.path.join(self.stringify_index_param({}), "model.keras")
+                os.path.join(self.stringify_index_param({}), "../model.keras")
             )
         )
 
