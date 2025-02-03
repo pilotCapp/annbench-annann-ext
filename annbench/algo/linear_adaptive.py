@@ -7,17 +7,12 @@ from tensorflow.keras.layers import Input, Dense, Lambda
 from tensorflow.keras import backend as K
 from tensorflow.keras import optimizers
 
+
+
 import multiprocessing
-
-num_threads = multiprocessing.cpu_count()
-print(num_threads)
-
 import faiss
 from .faiss_cpu import LinearANN
 faiss.omp_set_num_threads(32)  # Default to the max available threads
-
-from .hnsw import HnswANN
-
 
 print("TF num physical CPUs:", tf.config.experimental.list_physical_devices('CPU'))
 print("TF num logical CPUs:", tf.config.threading.get_intra_op_parallelism_threads())
@@ -34,96 +29,90 @@ print("TF num inter-op threads:", tf.config.threading.get_inter_op_parallelism_t
 tf.config.optimizer.set_jit(True)  # Enable XLA
 
 
+from .hnsw import HnswANN
 import numpy as np
 from pathlib import Path
 from hydra.utils import to_absolute_path
 import time
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, normalize
 import joblib
 from sklearn.model_selection import train_test_split
 
 
 @tf.function
-def contrastive_loss(y_true, d_pred, margin=1.0):
-    # Reshape y_true to match d_pred shape
-    y_true = tf.reshape(y_true, tf.shape(d_pred))  # Match shape to d_pred
-
-    y_true = tf.reshape(y_true, tf.shape(d_pred))
-    positive_loss = y_true * tf.square(d_pred)
-    negative_loss = (1 - y_true) * tf.square(tf.maximum(0.0, margin - d_pred))
-    return tf.reduce_mean(positive_loss + negative_loss)
+def batch_hard_triplet_loss(y_true, y_pred, margin=1):
+    anchor, positive, negative = y_pred[:, 0, :], y_pred[:, 1, :], y_pred[:, 2, :]
+    
+    pos_dist = tf.reduce_sum(tf.square(anchor - positive), axis=1)
+    neg_dist = tf.reduce_sum(tf.square(anchor - negative), axis=1)
+    
+    # Finn de harde negative eksemplene
+    hard_negatives = tf.reduce_max(neg_dist)
+    
+    loss = tf.reduce_mean(tf.maximum(pos_dist + margin - hard_negatives, 0.0))
+    return loss
 
 @tf.function
-def triplet_margin_loss(y_true, y_pred, margin=0.01):
+def triplet_loss(y_true, y_pred, margin=1):
     """
-    Triplet loss that enforces the positive distance is smaller by at least 'margin'
-    compared to each negative distance.
+    Triplet loss function.
 
     Args:
-        y_true: Not actually used (we rely on the structure of y_pred),
-                but Keras requires this signature.
-        y_pred: Shape (batch_size, K). 
-                - y_pred[:, 0] is the anchor->positive distance
-                - y_pred[:, 1:] are anchor->negative distances
-        margin: The enforced margin between positive and negative distances.
+        margin (float): Margin for triplet loss.
 
     Returns:
-        Scalar loss (tf.Tensor) which is the average margin violation across all negatives.
+        function: A loss function.
     """
-    # The first column is anchor->positive distance
-    pos_dist = y_pred[:, 0:1]  # shape: (batch_size, 1)
 
-    # The remaining columns are anchor->negative distances
-    neg_dist = y_pred[:, 5:]   # shape: (batch_size, K-1)
+    anchor = y_pred[:, 0, :]   # Shape: (batch_size, embedding_dim)
+    positive = y_pred[:, 1, :] # Shape: (batch_size, embedding_dim)
+    negative = y_pred[:, 2, :] # Shape: (batch_size, embedding_dim)
 
-    # Compute hinge-like margin loss per negative:
-    # loss = max(0, margin + pos_dist - neg_dist)
-    # If pos_dist + margin < neg_dist, no loss; else penalize the violation.
-    violations = tf.nn.relu(margin + pos_dist - neg_dist)
+    # Compute squared L2 distances
+    pos_dist = tf.reduce_sum(tf.square(anchor - positive), axis=1)
+    neg_dist = tf.reduce_sum(tf.square(anchor - negative), axis=1)
 
-    # Reduce over the negative dimension, then average over the batch
-    return tf.reduce_mean(violations)
+    # Compute triplet loss
+    basic_loss =  pos_dist + y_true - neg_dist
+    loss = tf.reduce_mean(tf.maximum(basic_loss, 0.0))
+
+    return loss
+
 
 
 @tf.function
-def distance_layer(tensors):
-    emb1, emb2, emb3 = tensors
+def mat_adaptive_loss_old(y_true, y_pred, bias=0.0):
+    print(y_pred.shape, y_true.shape)
+         
+    # Now y_pred has shape (batch_size, 2, num_embeddings)
+    distances_first_half = y_pred[:, 0, :]
+    distances_full = y_pred[:, 1, :]
+    return tf.reduce_mean(tf.square(distances_full - y_true[:,:,0]))
+
+@tf.function
+def mat_adaptive_loss(y_true, y_pred, bias=0.0):
+    """
+    Compute a weighted sum of two MSE losses based on a bias parameter.
+
+    Args:
+        y_true: Ground truth tensor.
+        y_pred: A list or tuple of predictions. 
+                For example, [pred1, pred2] if you have two prediction branches.
+        bias: A float value affecting the weighting between the two losses.
+
+    Returns:
+        A scalar tensor representing the combined loss.
+    """
+    distances_first_half = y_pred[:, 0, :]
+    distances_full = y_pred[:, 1, :]
     
-    return tf.norm(emb1 - emb3 +5e-9, axis=1, keepdims=True) + tf.norm(emb2 - emb3 +5e-9, axis=1, keepdims=True)
-    #(tf.norm(emb1 - emb2, axis=1, keepdims=True), tf.reduce_sum(emb1 * emb2, axis=1, keepdims=True))
+    # Compute individual MSE losses
+    loss1 = tf.reduce_mean(tf.square(distances_first_half - y_true[:,:,0]))
+    loss2 = tf.reduce_mean(tf.square(distances_full - y_true[:,:,0]))
 
-@tf.function
-def distribution_layer_old(tensors):
-    anchor, emb1, emb2, emb3, emb4, emb5, emb6,emb7, emb8, emb9, emb10 = tensors
-
-    distances = [
-        tf.norm(anchor - emb1, axis=1, keepdims=True),
-        tf.norm(anchor - emb2, axis=1, keepdims=True),
-        tf.norm(anchor - emb3, axis=1, keepdims=True),
-        tf.norm(anchor - emb4, axis=1, keepdims=True),
-        tf.norm(anchor - emb5, axis=1, keepdims=True),
-        tf.norm(anchor - emb6, axis=1, keepdims=True),
-        tf.norm(anchor - emb7, axis=1, keepdims=True),
-        tf.norm(anchor - emb8, axis=1, keepdims=True),
-        tf.norm(anchor - emb9, axis=1, keepdims=True),
-        tf.norm(anchor - emb10, axis=1, keepdims=True)
-    ]
-    
-    return tf.concat(distances, axis=1)  # shape: (batch_size, 10)
-
-@tf.function
-def distribution_layer(tensors):
-    # Assume tensors is a list: [anchor, emb1, emb2, ..., embN]
-    anchor = tensors[0]
-    distances = []
-    # Iterate over each embedding in the list (excluding the first anchor)
-    for emb in tensors[1:]:
-        # Compute distance between anchor and the current embedding
-        dist = tf.norm(anchor - emb, axis=1, keepdims=True)
-        distances.append(dist)
-    # Concatenate all distances: shape will be (batch_size, number_of_embeddings)
-    return tf.concat(distances, axis=1)
-
+    # Combine the losses with weights adjusted by bias
+    combined_loss = (0.5 + bias) * loss1 + (1.0 - bias) * loss2
+    return loss2
     
 
 
@@ -220,7 +209,7 @@ class Linear_Adaptive(BaseANN):
 
         self.partitions = 2
 
-        self.train_size = 0.9
+        self.train_size = 0.95
         self.is_adaptive = True
         self.nn_layers = 2
 
@@ -241,8 +230,7 @@ class Linear_Adaptive(BaseANN):
 
         batch_size = 512
         epochs = 100
-        n_pairs_closest = 10
-        n_pairs_random = 20
+        n_pairs_closest= 10
 
         if os.path.exists(model_path):
             print("model already exists")
@@ -257,8 +245,8 @@ class Linear_Adaptive(BaseANN):
         else:
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
 
-            self.normalizer.fit(vecs)
-            normalized_vecs = self.normalizer.transform(vecs)
+            #self.normalizer.fit(vecs)
+            normalized_vecs = normalize(vecs,norm='l2')
 
             vecs_train, vecs_test = train_test_split(
                 normalized_vecs, test_size=(1 - self.train_size), random_state=42
@@ -275,78 +263,112 @@ class Linear_Adaptive(BaseANN):
 
             # Build the encoder model
             encoded = input_vec
-            for layer in range(self.nn_layers):
-                encoded = Dense(self.full_dim, activation="linear")(encoded) #linear activation for simple conversion, relu seems to overfit more
+            #for layer in range(self.nn_layers):
+            #    encoded = Dense(self.full_dim, activation="linear")(encoded) #linear activation for simple conversion, relu seems to overfit more
+
+            encoded = Dense(self.full_dim, activation="relu")(encoded)
+
+
+
             
             # Linear as output activation
-            encoded = Dense(self.full_dim, activation="linear")(encoded)
+            encoded = Dense(int(self.full_dim), activation="linear")(encoded)
 
             # Define the encoder model as a shared encoder for
             shared_encoder = tf.keras.Model(input_vec, encoded)
 
             #Generate inputs and embeddings for final models
-            inputs = [Input(shape=(self.full_dim,), name=f"input_vec_{i}") for i in range(1, n_pairs_closest+2)]
-            embeddings = [shared_encoder(inp) for inp in inputs]
+            anchor_input = Input(shape=(self.full_dim,))
+            true_input = Input(shape=(self.full_dim,))
+            false_input = Input(shape=(self.full_dim,))
 
-            #Models utilizing shared encoder for distance and distribution calculation
-            distribution_pre = Lambda(distribution_layer)(embeddings)
-            distribution_post = Lambda(distribution_layer)(embeddings[:5])
+            anchor_embedding = shared_encoder(anchor_input)
+            true_embedding = shared_encoder(true_input)
+            false_embedding = shared_encoder(false_input)
 
-            distribution_model_pre = tf.keras.Model(inputs=inputs, outputs=distribution_pre)
-            distribution_model_post = tf.keras.Model(inputs=inputs[:5], outputs=distribution_post)
+            def stack_embeddings(tensors):
+                return tf.stack(tensors, axis=1) 
 
+            stacked_embeddings = Lambda(stack_embeddings, name='stacked_embeddings')(
+                [anchor_embedding, true_embedding, false_embedding]
+            )
+
+
+
+            distribution_model = tf.keras.Model(inputs=[anchor_input,true_input,false_input], 
+                                                outputs=stacked_embeddings)
+            
             
             ##MAKING TRAINING DATA FROM K NEAREST NEIGHBOURS
             self.pair_ann.add(normalized_vecs)
-            closest_train= self.pair_ann.query(vecs_train,n_pairs_closest+1,param ={"ef": 150})
-            closest_test= self.pair_ann.query(vecs_test,n_pairs_closest+1,param ={"ef": 150})
+            indices_train_closest= self.pair_ann.query(vecs_train,n_pairs_closest+1,param ={"ef": 150})
+            indices_test_closest= self.pair_ann.query(vecs_test,n_pairs_closest+1,param ={"ef": 150})
             
             #closest_train and closest_test contain each query point as target, because the query is also in the existing data
 
-            # Closest entries training instance
-            indices_train_closest = closest_train
-            indices_test_closest = closest_test
+            anchor_train=[]
+            true_train=[]
+            false_train=[]
 
-            #Generate training data
-            x_train_closest = normalized_vecs[indices_train_closest]
-            anchor = x_train_closest[:, 0:1, :]
-            neighbors = x_train_closest[:, 1:, :]
-            diff = neighbors - anchor  
             
-            y_train_closest = np.linalg.norm(diff, axis=2, keepdims=True).astype(np.float32)
-            list_of_inputs = [x_train_closest[:, i, :] for i in range(x_train_closest.shape[1])]
+            for indexes in indices_train_closest:
+                anchor = indexes[0]
+                for true_neighbour in range(1,len(indexes)):
+                    for false_neighbour in range(true_neighbour+1, len(indexes)):
+                        anchor_train.append(normalized_vecs[anchor])
+                        true_train.append(normalized_vecs[indexes[true_neighbour]])
+                        false_train.append(normalized_vecs[indexes[false_neighbour]])
+
+            anchor_train = np.array(anchor_train)
+            true_train = np.array(true_train)
+            false_train = np.array(false_train)
+
+            
+            
+            
+            y_train = np.linalg.norm(anchor_train-false_train,axis=1)-np.linalg.norm(anchor_train-true_train,axis=1)
+                              
+            
+            #list_of_training_input = [training_data[:, i, :] for i in range(training_data.shape[1])]
 
             #Generate validation data
-            indices_test = indices_test_closest
-            x_test_closest = normalized_vecs[indices_test]
-            list_of_validation = [x_test_closest[:, i, :] for i in range(x_test_closest.shape[1])]
+            anchor_test=[]
+            true_test=[]
+            false_test=[]
 
-            anchor_test = x_test_closest[:, 0:1, :]
-            neighbors_test = x_test_closest[:, 1:, :]
-            diff_test = neighbors_test - anchor_test  
             
-            y_test_closest = np.linalg.norm(diff_test, axis=2, keepdims=True).astype(np.float32)
+            for indexes in indices_test_closest:
+                anchor = indexes[0]
+                for true_neighbour in range(1,len(indexes)): 
+                    for false_neighbour in range(true_neighbour+1, len(indexes)):
+                        anchor_test.append(normalized_vecs[anchor])
+                        true_test.append(normalized_vecs[indexes[true_neighbour]])
+                        false_test.append(normalized_vecs[indexes[false_neighbour]])
+
+            anchor_test = np.array(anchor_test)
+            true_test = np.array(true_test)
+            false_test = np.array(false_test)
+
+            
+            
+            
+            y_test = np.linalg.norm(anchor_test-false_test,axis=1)-np.linalg.norm(anchor_test-true_test,axis=1)
+
+            #list_of_validation_input = [validation_data[:, i, :] for i in range(validation_data.shape[1])]
 
 
             ##TRAINING
             early_stopping = tf.keras.callbacks.EarlyStopping(
-                monitor="val_loss", patience=10, restore_best_weights=True
+                monitor="val_loss", patience=5, restore_best_weights=True
             )
         
             #compile the two models, one for the n_pairs_closest entries and one for the n_pairs_closest/2 closest entries (currently 10)
-            distribution_model_pre.compile(optimizer=tf.keras.optimizers.Adam(), loss="mse")
-            distribution_model_post.compile(optimizer=tf.keras.optimizers.Adam(), loss="mse")
+            distribution_model.compile(optimizer=tf.keras.optimizers.Adam(), loss=triplet_loss)
 
-            
-            early_stopping = tf.keras.callbacks.EarlyStopping(
-                monitor="val_loss", patience=10, restore_best_weights=True
-            )
         
-            distribution_model_pre.fit(list_of_inputs, y_train_closest, validation_data=(list_of_validation, y_test_closest),epochs=400,
-            batch_size=batch_size, callbacks=[early_stopping],)
-            
-            distribution_model_post.fit(list_of_inputs[:5], y_train_closest[:,:4], validation_data=(list_of_validation[:5], y_test_closest[:,:4]),epochs=200,
-            batch_size=batch_size, callbacks=[early_stopping],)
+    
+            distribution_model.fit([anchor_train,true_train,false_train], y_train, validation_data=([anchor_test,true_test,false_test], y_test),epochs=epochs,
+            batch_size=batch_size, callbacks=[early_stopping])
 
             #Save encoder to shared space for adaptive and non-adaptive 
             self.encoder = shared_encoder
@@ -366,7 +388,7 @@ class Linear_Adaptive(BaseANN):
 
     def add(self, vecs):
 
-        self.index = self.encoder.predict(self.normalizer.transform(vecs))
+        self.index = self.encoder.predict(normalize(vecs,norm='l2'))
         if self.is_adaptive:
             self.ANN.add(self.index[:, : self.partition_dim])
         else:
@@ -390,10 +412,12 @@ class Linear_Adaptive(BaseANN):
         # Compute pairwise distances between query vectors and index
         # Using broadcasting for efficient computation
 
+        search_k = param["search_k"]
+
         time_log = time.time()
         time_log_1 = time.time()
 
-        normalized_vecs = self.normalizer.transform(vecs)
+        normalized_vecs = normalize(vecs,norm='l2')
         encoded_vecs = self.encode(normalized_vecs).numpy()
         vecs = encoded_vecs
 
@@ -431,7 +455,7 @@ class Linear_Adaptive(BaseANN):
         # candidates = np.argpartition(distances_1, topk * 10, axis=1)[:, : topk * 10]
 
         candidates, distances_1 = self.ANN.query(
-            vecs[:, : self.partition_dim], 1000, param, ret_distances=True
+            vecs[:, : self.partition_dim], search_k, param, ret_distances=True
         )
 
         self.query_time_2_2 += (
