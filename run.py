@@ -86,8 +86,8 @@ def main(cfg: DictConfig) -> None:
                         algo=algo,
                         vecs_query=dataset.vecs_query(),
                         gt=dataset.groundtruth(),
-                        topk=1,
-                        r=1,
+                        topk=cfg.topk,
+                        r=cfg.r,
                         param_query=param_query,
                     )
                     for _ in range(cfg.num_trial)
@@ -100,6 +100,7 @@ def main(cfg: DictConfig) -> None:
                     "param_query": dict(param_query),
                     "runtime_per_query": float(runtime_per_query),
                     "recall": float(recall),
+                    "recall_topk": int(cfg.topk),
                 }
             )
             log.info("Finish")

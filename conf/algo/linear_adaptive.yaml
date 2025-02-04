@@ -4,10 +4,16 @@ name: linear_adaptive
 
 param_index:
   - is_adaptive: True
+    partitions: 4
+
   - is_adaptive: False
+    partitions: 4
+  
 
 
 
 param_query:
-  dummy:
-    - 0
+  search_k:
+    - 100
+    - 200
+    - 300

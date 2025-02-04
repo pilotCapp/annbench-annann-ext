@@ -5,6 +5,7 @@ defaults:
   - algo: annoy
   - specialized_param: ${defaults.1.dataset}_${defaults.2.algo}
     optional: true
+  
 
 # Directories for data
 interim: ./interim
@@ -12,3 +13,5 @@ output: ./output
 
 # flags
 num_trial: 100
+topk: 1
+r: 1
