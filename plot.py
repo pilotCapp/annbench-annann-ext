@@ -19,11 +19,11 @@ def main(cfg: DictConfig) -> None:
     recall_topk = 1
     
     for p_dataset in sorted(out.glob("*")):
-        if p_dataset.is_file():
+        if p_dataset.is_file() or p_dataset.name.startswith("."):
             continue
         lines = []
         for p_algo in sorted(p_dataset.glob("*")):
-            if p_algo.is_file():
+            if p_algo.is_file() or p_algo.name.startswith("."):
                 continue
             log.info(f"Check {(p_algo / 'result.yaml').resolve()}")
             with (p_algo / "result.yaml").open("rt") as f:
