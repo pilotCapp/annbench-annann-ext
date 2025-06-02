@@ -6,6 +6,7 @@ import tensorflow as tf
 from tensorflow.keras.layers import Input, Dense, Lambda
 from tensorflow.keras import backend as K
 from tensorflow.keras import optimizers
+import time
 
 
 
@@ -53,7 +54,7 @@ def batch_hard_triplet_loss(y_true, y_pred, margin=1):
     return loss
 
 @tf.function
-def triplet_loss(y_true, y_pred, margin=1):
+def triplet_loss_old(y_true, y_pred, margin=1):
     """
     Triplet loss function.
 
@@ -78,6 +79,73 @@ def triplet_loss(y_true, y_pred, margin=1):
 
     return loss
 
+@tf.function
+def triplet_loss(y_true, y_pred, partition_dims=None, bias=0):
+    """
+    Triplet loss function computed over multiple partitions of the embedding space.
+    
+    For each partition defined in partition_dims (e.g. [d1, d2, ..., full_dim]),
+    the loss is computed using the first k dimensions (0:k) and then scaled by
+    k/full_dim. The final loss is the sum of the scaled losses.
+
+    Args:
+        y_true: Unused here, but you can use it for margin if needed.
+        y_pred: Tensor of shape (batch_size, 3, embedding_dim) containing
+                the anchor, positive, and negative embeddings.
+        margin (float): Margin for the triplet loss.
+        partition_dims (list or tensor of ints): A list of increasing dimension indices.
+            For example, if the embedding is 128 dimensions, you might use
+            [12, 32, 64, 128]. The loss computed using the first 12 dims will be scaled
+            by 12/128, the loss computed with the first 32 dims will be scaled by 32/128, etc.
+    
+    Returns:
+        loss (tf.Tensor): A scalar tensor containing the combined triplet loss.
+    """
+    # Unpack the triplets.
+    anchor   = y_pred[:, 0, :]  # Shape: (batch_size, embedding_dim)
+    positive = y_pred[:, 1, :]  # Shape: (batch_size, embedding_dim)
+    negative = y_pred[:, 2, :]  # Shape: (batch_size, embedding_dim)
+    
+    # Determine the full dimensionality (as float for scaling)
+    full_dim = tf.cast(tf.shape(anchor)[1], tf.float32)
+    
+    # If no partition_dims is provided, use the full embedding.
+    if partition_dims is None:
+        partition_dims = [tf.shape(anchor)[1]]
+    else:
+        # Ensure partition_dims is a tensor.
+        partition_dims = tf.convert_to_tensor(partition_dims, dtype=tf.int32)
+    
+    total_loss = 0.0
+
+    # Loop over each partition. For each partition, use the first k dimensions.
+    for k in partition_dims:
+        # Convert k to int32 and float32 as needed.
+        k_int   = tf.cast(k, tf.int32)
+        k_float = tf.cast(k, tf.float32)
+        
+        # Extract the relevant partition from each embedding.
+        anchor_part   = anchor[:, :k_int]
+        positive_part = positive[:, :k_int]
+        negative_part = negative[:, :k_int]
+        
+        # Compute squared L2 distances for the partition.
+        pos_dist = tf.reduce_sum(tf.square(anchor_part - positive_part), axis=1)
+        neg_dist = tf.reduce_sum(tf.square(anchor_part - negative_part), axis=1)
+        
+        # Compute the basic triplet loss for this partition.
+        # (You could also use y_true here if you intended to use dynamic margins.)
+        basic_loss = pos_dist + y_true - neg_dist
+        
+        # Apply hinge so that we only penalize when (pos_dist + margin > neg_dist).
+        loss_part = tf.reduce_mean(tf.maximum(basic_loss, 0.0))
+        
+        # Scale the loss by the fraction of dimensions used.
+        scale = k_float / full_dim
+        
+        total_loss += scale * loss_part*bias + (1-bias)*loss_part
+
+    return total_loss
 
 
 @tf.function
@@ -179,16 +247,17 @@ def top1_ranking_loss(y_true, y_pred, margin=0):
 
 
 
-
-
 class Linear_Adaptive(BaseANN):
     def __init__(self):
         self.index = None
         self.index_norms = None
         self.ANN = LinearANN()
+        self.search_k = 5000
 
+        self.partitions = 2
         self.full_dim = 128
-        self.partition_dim = 64
+        self.partition_dims = [64]
+        self.dimensional_weights = 0
 
         self.query_runs = 0
 
@@ -207,329 +276,163 @@ class Linear_Adaptive(BaseANN):
         self.query_time_3_2 = 0
         self.query_time_3_3 = 0
 
-        self.partitions = 2
-
-        self.train_size = 0.95
-        self.is_adaptive = True
-        self.nn_layers = 2
-
         self.path = None
         self.encoder = None
-        self.normalizer = StandardScaler()
-
-        self.pair_ann = HnswANN()  # use HNSW for cluster lookup
-        self.pair_ann.set_index_param({"ef_construction": 300, "M": 32})
+        
 
 
-    def set_index_param(self, param):
+    def set_index_param(self, param, ndim=0):
         self.is_adaptive = param["is_adaptive"]
+        pd = param.get("partition_dims", "16,128")
+        if isinstance(pd, str):
+            self.partition_dims = [int(x.strip()) for x in pd.split(",")]
+        else:
+            self.partition_dims = list(pd)
+        self.search_k = param["search_k"]
+
+        if ndim>0:
+            self.full_dim = ndim
+
+        # # Create n+1 equally spaced numbers between 0 and 1.
+        # x = np.linspace(0, 1, self.partitions+1)
+        # power=1.5
+        # # Apply a power transformation to create a nonlinear spacing.
+        # # (You can adjust `power` to control how fast slice sizes grow.)
+        # boundaries = np.round(self.full_dim * x**power).astype(int)
+        # # Ensure the first and last boundaries are 0 and total.
+        # boundaries[0] = 0
+        # boundaries[-1] = self.full_dim
+        # # Build a list of slice (start, stop) tuples.
+        # slices = [boundaries[i] for i in range(1,self.partitions+1)]
+        # self.partition_dims = slices
+        # #[16,45,83), np.int64(128)]
+        print("partition_dims is ",self.partition_dims)
+
 
     def train(self, vecs, path):
-        self.path = path
-        model_path = os.path.join(path, "../model.keras")
-
-        batch_size = 512
-        epochs = 100
-        n_pairs_closest= 10
-
-        if os.path.exists(model_path):
-            print("model already exists")
-            self.encoder = tf.keras.models.load_model(model_path)
-
-            self.normalizer = joblib.load(os.path.join(path, "../normalizer.pkl"))
-            print(
-                "encoder retrieved with input/output shape",
-                self.encoder.input_shape,
-                self.encoder.output_shape,
-            )
-        else:
-            os.makedirs(os.path.dirname(model_path), exist_ok=True)
-
-            #self.normalizer.fit(vecs)
-            normalized_vecs = normalize(vecs,norm='l2')
-
-            vecs_train, vecs_test = train_test_split(
-                normalized_vecs, test_size=(1 - self.train_size), random_state=42
-            )
-
-            # take only the first n_size elements
-            self.full_dim = normalized_vecs.shape[1]
-            self.partition_dim = int(self.full_dim / self.partitions)
-            input_vec = Input(shape=(self.full_dim,))
-            print("input dim is", self.full_dim)
-
-            # Calculate the sizes of the encoder layers
-            # This will create a list of sizes decreasing from input_dim to encoding_dim
-
-            # Build the encoder model
-            encoded = input_vec
-            #for layer in range(self.nn_layers):
-            #    encoded = Dense(self.full_dim, activation="linear")(encoded) #linear activation for simple conversion, relu seems to overfit more
-
-            encoded = Dense(self.full_dim, activation="relu")(encoded)
-
-
-
-            
-            # Linear as output activation
-            encoded = Dense(int(self.full_dim), activation="linear")(encoded)
-
-            # Define the encoder model as a shared encoder for
-            shared_encoder = tf.keras.Model(input_vec, encoded)
-
-            #Generate inputs and embeddings for final models
-            anchor_input = Input(shape=(self.full_dim,))
-            true_input = Input(shape=(self.full_dim,))
-            false_input = Input(shape=(self.full_dim,))
-
-            anchor_embedding = shared_encoder(anchor_input)
-            true_embedding = shared_encoder(true_input)
-            false_embedding = shared_encoder(false_input)
-
-            def stack_embeddings(tensors):
-                return tf.stack(tensors, axis=1) 
-
-            stacked_embeddings = Lambda(stack_embeddings, name='stacked_embeddings')(
-                [anchor_embedding, true_embedding, false_embedding]
-            )
-
-
-
-            distribution_model = tf.keras.Model(inputs=[anchor_input,true_input,false_input], 
-                                                outputs=stacked_embeddings)
-            
-            
-            ##MAKING TRAINING DATA FROM K NEAREST NEIGHBOURS
-            self.pair_ann.add(normalized_vecs)
-            indices_train_closest= self.pair_ann.query(vecs_train,n_pairs_closest+1,param ={"ef": 150})
-            indices_test_closest= self.pair_ann.query(vecs_test,n_pairs_closest+1,param ={"ef": 150})
-            
-            #closest_train and closest_test contain each query point as target, because the query is also in the existing data
-
-            anchor_train=[]
-            true_train=[]
-            false_train=[]
-
-            
-            for indexes in indices_train_closest:
-                anchor = indexes[0]
-                for true_neighbour in range(1,len(indexes)):
-                    for false_neighbour in range(true_neighbour+1, len(indexes)):
-                        anchor_train.append(normalized_vecs[anchor])
-                        true_train.append(normalized_vecs[indexes[true_neighbour]])
-                        false_train.append(normalized_vecs[indexes[false_neighbour]])
-
-            anchor_train = np.array(anchor_train)
-            true_train = np.array(true_train)
-            false_train = np.array(false_train)
-
-            
-            
-            
-            y_train = np.linalg.norm(anchor_train-false_train,axis=1)-np.linalg.norm(anchor_train-true_train,axis=1)
-                              
-            
-            #list_of_training_input = [training_data[:, i, :] for i in range(training_data.shape[1])]
-
-            #Generate validation data
-            anchor_test=[]
-            true_test=[]
-            false_test=[]
-
-            
-            for indexes in indices_test_closest:
-                anchor = indexes[0]
-                for true_neighbour in range(1,len(indexes)): 
-                    for false_neighbour in range(true_neighbour+1, len(indexes)):
-                        anchor_test.append(normalized_vecs[anchor])
-                        true_test.append(normalized_vecs[indexes[true_neighbour]])
-                        false_test.append(normalized_vecs[indexes[false_neighbour]])
-
-            anchor_test = np.array(anchor_test)
-            true_test = np.array(true_test)
-            false_test = np.array(false_test)
-
-            
-            
-            
-            y_test = np.linalg.norm(anchor_test-false_test,axis=1)-np.linalg.norm(anchor_test-true_test,axis=1)
-
-            #list_of_validation_input = [validation_data[:, i, :] for i in range(validation_data.shape[1])]
-
-
-            ##TRAINING
-            early_stopping = tf.keras.callbacks.EarlyStopping(
-                monitor="val_loss", patience=5, restore_best_weights=True
-            )
-        
-            #compile the two models, one for the n_pairs_closest entries and one for the n_pairs_closest/2 closest entries (currently 10)
-            distribution_model.compile(optimizer=tf.keras.optimizers.Adam(), loss=triplet_loss)
-
-        
-    
-            distribution_model.fit([anchor_train,true_train,false_train], y_train, validation_data=([anchor_test,true_test,false_test], y_test),epochs=epochs,
-            batch_size=batch_size, callbacks=[early_stopping])
-
-            #Save encoder to shared space for adaptive and non-adaptive 
-            self.encoder = shared_encoder
-            self.encoder.save(model_path)
-            joblib.dump(self.normalizer, os.path.join(path, "../normalizer.pkl"))
-            print("model saved")
-            time.sleep(2) #duplicated training instance bug fix
+        pass
             
     def has_train(self):
         print("checking if requires training")
-        print(self.is_adaptive)
         return (
-            not os.path.exists(
-                os.path.join(self.stringify_index_param({}), "../model.keras")
-            )
+            False
         )
 
     def add(self, vecs):
-
-        self.index = self.encoder.predict(normalize(vecs,norm='l2'))
+        self.index = vecs
+            
         if self.is_adaptive:
-            self.ANN.add(self.index[:, : self.partition_dim])
+            self.ANN.add(self.index[:, : self.partition_dims[0]])
         else:
             self.ANN.add(self.index)
         # self.index_norms_1 = np.sum(self.index[:, : self.partition_dim] ** 2, axis=1)
-        self.index_norms_2 = np.sum(self.index[:, self.partition_dim :] ** 2, axis=1)
+        self.index_norms = np.sum(self.index[:, self.partition_dims[0] :] ** 2, axis=1)
 
     # ## Brute force search using numpy, slower but no index generation required for each query vector during pruning
 
     def query(self, vecs, topk, param=None):
         """
-        Finds the top-k nearest neighbors for each query vector in vecs.
-
+        Finds the top-k nearest neighbors for each query vector in vecs,
+        using an initial faiss query on the first partition followed by
+        iterative pruning on each additional partition in self.partition_dims.
+    
         Args:
             vecs (np.ndarray): 2D array where each row is a query vector.
             topk (int): Number of nearest neighbors to return.
-
+            param (dict, optional): Dictionary of parameters. Expected keys:
+                - "search_k": candidate pool size for the faiss query.
+                - "prune_factor": factor to multiply topk for candidate pruning.
+                  (Default is 10 if not provided.)
+        
         Returns:
-            np.ndarray: 2D array of shape (len(vecs), topk) containing the indices of the top-k nearest neighbors for each query.
-        """
-        # Compute pairwise distances between query vectors and index
-        # Using broadcasting for efficient computation
-
-        search_k = param["search_k"]
-
-        time_log = time.time()
-        time_log_1 = time.time()
-
-        normalized_vecs = normalize(vecs,norm='l2')
-        encoded_vecs = self.encode(normalized_vecs).numpy()
-        vecs = encoded_vecs
-
-        if not self.is_adaptive:
-            topk_indices = self.ANN.query(
-            vecs, topk, param, ret_distances=False
-            )
-            return topk_indices
+            np.ndarray: 2D array of shape (len(vecs), topk) with the indices
+            of the top-k nearest neighbors for each query.
+        """        # Set candidate pool sizes and prune factor (fallback defaults)
+        #search_k = int(self.partition_dims[0]/self.partition_dims[-1]*len(self.index))
 
         
-        self.query_time_1_1 += (
-            time.time() - time_log_1
-        )  # Time for initial distance calculation
-        time_log_1 = time.time()
-
-        self.query_time_1 += (
-            time.time() - time_log
-        )  # Time for initial distance calculation
-        time_log = time.time()
-        time_log_2 = time.time()
-
-        # vecs_norms = np.sum(vecs[:, : self.partition_dim] ** 2, axis=1)
-
-        # distances_1 = (
-        #     self.index_norms_1[None, :]
-        #     - 2 * (vecs[:, :self.partition_dim] @ self.index[:, :self.partition_dim].T)
-        #     + vecs_norms[:, None]
-        # )
-
-        # self.query_time_1_1 += (
-        #     time.time() - time_log_1
-        # )  # Time for initial distance calculation
-        # time_log_1 = time.time()
-
-        # candidates = np.argpartition(distances_1, topk * 10, axis=1)[:, : topk * 10]
-
-        candidates, distances_1 = self.ANN.query(
-            vecs[:, : self.partition_dim], search_k, param, ret_distances=True
+        # (Optional) timing logs
+        t_start = time.time()
+    
+        # Normalize and encode the query vectors (your encoding step)
+    
+        # If not in adaptive mode, use a plain ANN query and return.
+        if not self.is_adaptive:
+            return self.ANN.query(vecs, topk, param=None, ret_distances=False)
+    
+        # Assume self.partition_dims is a list of increasing boundaries.
+        # For example, if total dimension is 128:
+        #    self.partition_dims = [d1, d2, 128]
+        partition_dims = self.partition_dims
+        num_queries = vecs.shape[0]
+    
+        # --- Stage 1: Initial Candidate Generation via faiss on first partition ---
+        # Use the first partition (dimensions 0:partition_dims[0]) for the ANN query.
+        candidates, distances = self.ANN.query(
+            vecs[:, :partition_dims[0]], self.search_k, param=None, ret_distances=True
         )
-
-        self.query_time_2_2 += (
-            time.time() - time_log_2
-        )  # Time for initial distance calculation
-        time_log_2 = time.time()
-
-        self.query_time_2 += (
-            time.time() - time_log
-        )  # Time for initial distance calculation
-        time_log = time.time()
-
-        # Get the indices of the candidates
-
-        # Alternatively, if you want the actual candidate vectors from self.index
-        # candidate_vectors = self.index[candidates[1]]
-
-        candidate_vectors = self.index[
-            candidates, self.partition_dim :
-        ]  # Shape: (num_queries, num_candidates, split_dim)
-        candidate_norms = self.index_norms_2[
-            candidates
-        ]  # Shape: (num_queries, num_candidates)
-
-        # Extract the second half of the query vectors
-        query_vectors = vecs[:, self.partition_dim :]  # Shape: (num_queries, split_dim)
-
-        # Compute dot products: (num_queries, num_candidates)
-        dot_products = np.einsum("ij,ikj->ik", query_vectors, candidate_vectors)
-
-        # Compute query norms: (num_queries, 1), then broadcast to (num_queries, num_candidates)
-        query_norms = np.sum(query_vectors**2, axis=1, keepdims=True)
-
-        # Compute final distances: (num_queries, num_candidates)
-        final_distances = (
-            candidate_norms  # Precomputed norms for candidates
-            - 2 * dot_products  # Dot products
-            + query_norms  # Query norms
-        )
-
-        # Step 3: Combine distances from both halves
-        combined_distances = distances_1 + final_distances
-
-        # Step 4: Select top-k based on combined distances
-        topk_indices_within_candidates = np.argpartition(
-            combined_distances, topk, axis=1
-        )[:, :topk]
-
-        topk_indices = candidates[
-            np.arange(vecs.shape[0])[:, None], topk_indices_within_candidates
-        ]
-
-        # Step 5: Sort top-k indices based on final combined distances
-        sorted_order = np.argsort(
-            combined_distances[
-                np.arange(vecs.shape[0])[:, None],
-                topk_indices_within_candidates,
-            ],
-            axis=1,
-        )
-        topk_indices = topk_indices[
-            np.arange(topk_indices.shape[0])[:, None], sorted_order
-        ]
-
-        self.query_time_3 += (
-            time.time() - time_log
-        )  # Time for top-k selection and sorting
-        time_log = time.time()
-
-        return topk_indices
-
-    @tf.function(reduce_retracing=True)
-    def encode(self, vecs):
-        return self.encoder(vecs, training=False)
+        # 'candidates' is assumed to be of shape (num_queries, search_k)
+        # and 'distances' of the same shape.
+    
+        # --- Stage 2: Iterative Refinement over subsequent partitions ---
+        # For each additional partition (i=1,2,...), update the cumulative distance
+        # and prune the candidate set.
+        for i in range(1, len(partition_dims)):
+            if partition_dims[i]>param["partition_stop"]:
+                break
+            # Define the slice for the current partition:
+            start = partition_dims[i - 1]
+            stop = partition_dims[i]
+    
+            # Extract the portion of the query vectors for the current partition.
+            query_part = vecs[:, start:stop]  # shape: (num_queries, slice_dim)
+    
+            # Retrieve the candidate vectors for this partition.
+            # Using advanced indexing, the result has shape:
+            # (num_queries, current_candidate_count, slice_dim)
+            candidate_vectors = self.index[candidates, start:stop]
+    
+            # Get (or compute) the norms for the candidate vectors in this partition.
+            # If you have precomputed norms for each partition stored as a list (with one entry per partition),
+            # you can do:
+            #
+            #candidate_norms = self.index_norms_list[i][candidates]
+            #
+            # Otherwise, compute on the fly:
+            candidate_norms = np.sum(candidate_vectors**2, axis=2)  # shape: (num_queries, num_candidates)
+    
+            # Compute dot products between the query partition and candidate vectors.
+            dot_products = np.einsum("ij,ikj->ik", query_part, candidate_vectors)
+            # Compute norms for the query part.
+            query_norms = np.sum(query_part**2, axis=1, keepdims=True)
+    
+            # Compute the squared Euclidean distance for this partition:
+            partition_distances = candidate_norms - 2 * dot_products + query_norms
+    
+            # Update the cumulative distances.
+            distances = distances + partition_distances
+    
+            # --- Prune the candidate set ---
+            # Keep only the top (topk * prune_factor) candidates for each query.
+            new_pool_size = int((stop-start)*self.partition_dims[-1]*len(candidates))
+            k = min(new_pool_size, distances.shape[1] - 1)
+            top_candidate_idxs = np.argpartition(distances, k, axis=1)[:, :new_pool_size]
+            # Use np.take_along_axis to keep only the selected candidates and their distances.
+            candidates = np.take_along_axis(candidates, top_candidate_idxs, axis=1)
+            distances = np.take_along_axis(distances, top_candidate_idxs, axis=1)
+    
+        # --- Stage 3: Final Selection ---
+        # From the final candidate set, choose the topk candidates based on the cumulative distance.
+        topk_candidate_idxs = np.argpartition(distances, topk, axis=1)[:, :topk]
+        final_candidates = np.take_along_axis(candidates, topk_candidate_idxs, axis=1)
+        # Sort these final candidates according to their distances.
+        sorted_order = np.argsort(np.take_along_axis(distances, topk_candidate_idxs, axis=1), axis=1)
+        final_candidates = np.take_along_axis(final_candidates, sorted_order, axis=1)
+    
+        # (Optional) log query time if desired:
+        # self.query_time_total += time.time() - t_start
+    
+        return final_candidates
 
     def write(self, path):
         print("Writing index")
@@ -537,19 +440,19 @@ class Linear_Adaptive(BaseANN):
         with open(os.path.join(path, "index.pkl"), "wb") as f:
             pickle.dump(self.index, f)
         with open(os.path.join(path, "index_norms.pkl"), "wb") as f:
-            pickle.dump(self.index_norms_2, f)
+            pickle.dump(self.index_norms, f)
         self.ANN.write(os.path.join(path, "faiss_index.bin"))
 
     def read(self, path, D):
         print("Reading index")
         with open(os.path.join(path, "index.pkl"), "rb") as f:
             self.index = pickle.load(f)
-        self.encoder = tf.keras.models.load_model(os.path.join(path, "model.keras"))
         self.ANN.read(os.path.join(path, "faiss_index.bin"), D)
-        self.normalizer = joblib.load(os.path.join(path, "../normalizer.pkl"))
-        self.index_norms_2 = pickle.load(
+        self.index_norms = pickle.load(
             open(os.path.join(path, "index_norms.pkl"), "rb")
         )
+        self.full_dim = self.index.shape[1]
+
 
     def time_log(self):
 
@@ -572,4 +475,4 @@ class Linear_Adaptive(BaseANN):
 
     def stringify_index_param(self, param):
         """Convert index parameters to a string representation."""
-        return f"train_size_{self.train_size}_layers_{self.nn_layers}_is_adaptive_{self.is_adaptive}"
+        return f"is_adaptive_{self.is_adaptive}_partitions_{self.partitions}"
