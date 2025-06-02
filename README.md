@@ -1,13 +1,19 @@
 # This repository is a fork of the original annbench benchmarking library
-## It is used to generate and benchmark the annann algorithm
+## It is used to generate and benchmark the annann and linear-adaptive algorithms
 Read README-ANNANN for more information about the implementation of the algorithm
 
+### Note: multiple small configurations and different versions has been altered in this code for testing purposes, leading to a potentially fault-infested surcecode. Going forward this repository should therefore be considered read-only (unless you feel brave)
+
 # annbench: a lightweight benchmark for approximate nearest neighbor search
+# linear-adaptive: A brute-force alorithm utilizing FAISS together with Partial Distance Pruning (PDE) for optimized linear scan on MR-embeddings
+
 
 `annbench` is a simple benchmark for approximate nearest neighbor search algorithms in Python. This repository design is strongly influenced by a great project, [ann-benchmarks](https://github.com/erikbern/ann-benchmarks), that provides comprehensive and thorough benchmarks for various algorithms. In contrast, we aim to deliver more lightweight and straightforward scripts with the following features.
 
+
+
 - Support Euclidean distance only
-- Support Recall@1 only
+- Support Recall@1 only, (higher recall is supported however needs to be stated in run config. Wrong recall might be used if you change recall without clearing all algo-output)
 - Support libraries installable via pip/conda only
 - Search with a single thread
 - Sweep by a single query parameter
@@ -77,6 +83,8 @@ Several datasets can be downloaded at once by `python download.py --multirun dat
 | sift1m    | 128 | 1,000,000 | 10,000 | 100,000 | |
 | deep1m    |  96 | 1,000,000 | 10,000 | 100,000 | The first 1M vectors of [Deep1B](https://github.com/arbabenko/GNOIMI). [Hepler scripts](https://github.com/matsui528/deep1b_gt)|
 
+### EA-datasets also contain some MR-embeddings used for benchmarking
+
 ## Supported Algorithms
 - [linear scan (faiss)](https://github.com/facebookresearch/faiss/blob/main/faiss/IndexFlat.h)
 - [pq (faiss)](https://github.com/facebookresearch/faiss/blob/main/faiss/IndexPQ.h)
@@ -89,6 +97,10 @@ Several datasets can be downloaded at once by `python download.py --multirun dat
 - [hnsw (hnswlib)](https://github.com/nmslib/hnswlib)
 - [scann](https://github.com/google-research/google-research/tree/master/scann)
 - [pynndescent](https://github.com/lmcinnes/pynndescent)
+
+- [linear-adaptive] brute-force adaptive KNN algorithm for MR-trained embeddings
+- [linear-adaptive_MRL-EA] linear-adaptive with EA training steps for MRL Embedding adaptation
+
 
 Note that `hnsw (hnswlib)` is an original implementation by the original authors, and `hnsw (faiss)` is a re-implemented version by the faiss team.
 
